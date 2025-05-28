@@ -1,0 +1,833 @@
+---
+title: "Formatting Datasets"
+author: "hui.wan"
+date: "11/08/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, tidy=TRUE, cache=TRUE)
+
+# knitr::opts_knit$set(root.dir = '~/OneDrive - KI.SE/Mac/Project/202206_Kataegis/')
+knitr::opts_knit$set(root.dir = '~/OneDrive - Karolinska Institutet/Mac//Project/Kataegis/')
+
+knitr::opts_knit$set(root.dir = '~/OneDrive - Karolinska Institutet/Documents/Project/Kataegis_2023/')
+
+```
+  
+## Aim
+
+This program is to process the rawdata from different data source, and covert them to the uniformatted inputfiles for SigProfile and for running Kataegis.
+
+Among different data source, you need to note 1. Genome GRCh37/38, if GRCh38, need to lift coordinate to GRCh37; 2. Duplicated sample. there may be some same sample between different datasets, for instance, DLBCL have overlap samples in 2018_NatCom and ICGC. You need to remove the duplicate samples; 3. Chromosome. Some dataset have no 'chr' predix in the column, if so you need to add the predix. Besides, Some datset may not only have 1-22+X+Y, the additional chromsome need to be removed.  
+
+## History
+There are two directories with old analysis
+1. ~/project/Kataegis/ : Our JEM sample + ICGC + literature + MCL old pipeline (n ~= 600)
+2. ~/project/202205_JEM_reproduce: Our own WGS runned by new pipeline (n = 200)
+3. Now, we need to merge the two history together + MM
+
+- load packages
+```{r packages}
+library(tidyverse)
+library(readxl)
+library(conflicted)
+library(R.utils)
+# library(liftOver) # GRCh38 to GRCh37, DONE online
+conflict_prefer("filter", "dplyr")
+conflict_prefer("select", "dplyr")
+
+chroms = str_c('chr', c(seq(1,22), 'X', 'Y'))
+
+# in case as.character(100000) = "1e+05"
+old_opts <- options(scipen = 1000)
+on.exit(options(old_opts))
+```
+
+
+- define functions 
+
+```{r functions}
+# function: read and subgrep
+read_icgc <- function(filename) {
+  read_tsv(filename,  col_types = cols(.default = "c")) %>% 
+    filter(sequencing_strategy == 'WGS') %>% 
+    mutate( Type = 'SOMATIC', chrom = str_c('chr', chromosome),
+            pos_start = as.numeric(chromosome_start), pos_end = as.numeric(chromosome_end), 
+            ref = reference_genome_allele, alt = mutated_to_allele,
+            mut_type = if_else(str_length(ref) == 1 & str_length(alt) == 1 & ref != '-' & alt != '-', 'SNV',
+                               if_else(str_length(ref) == 2 & str_length(alt) == 2, 'DINUC',
+                                       'INDEL')) ) %>% 
+    dplyr::select(Project = project_code, Sample = icgc_donor_id, ID = icgc_mutation_id, 
+           Genome = assembly_version, mut_type,  chrom, 
+           pos_start, pos_end, 
+           ref , alt , Type) %>% 
+    distinct()
+
+}
+
+# function: read_single SNV 
+read.single.SNV <- function(filename,  path){
+  #path = mydir
+  #filename = 'PAN-MDACC-MC301PBL-VS-PAN-MDACC-MC301D.merged.norm.final.hg19_multianno.txt'
+  samplename = str_remove_all(str_remove_all(filename, '\\..*$'), '.*-')
+  print(paste0('Reading ', samplename))
+  
+  #read_tsv(gzfile(str_c(path, filename,sep='/'))) %>%  # gzfile leads to uncompleted reading 
+  read_tsv(gunzip(str_c(path, filename,sep='/'), remove = F)) %>%  # gzfile leads to uncompleted reading 
+    select(Chr, Start, End, Ref , Alt ) %>% 
+    mutate(Sample = samplename, Start = as.numeric(Start), End = as.numeric(End),
+           mut_type = if_else(Ref == '-' | Alt == '-' | str_length(Ref) > 1 | str_length(Alt) > 1, 'INDEL', 'SNV'))
+}
+
+
+
+
+# function: icgc to forKataegis, each sample each file
+write_kataegis <- function(df_forSig, store_path){
+  
+  # DINUC split to two SNVs
+  df_dinuc1 = df_forSig %>% 
+    filter(mut_type == 'DINUC') %>% 
+    mutate(mut_type = 'SNV', ref = str_sub(ref, 1, 1), alt = str_sub(alt, 1,1))
+  
+  df_dinuc2 = df_forSig %>% 
+    filter(mut_type == 'DINUC') %>% 
+    mutate(mut_type = 'SNV', ref = str_sub(ref, 2, 2), alt = str_sub(alt, 2, 2))
+  
+  # prepare each samples'  SNVs  ---
+  df_kataegis = df_forSig %>% 
+    #---- bind DINUC ---------#
+    bind_rows(df_dinuc1, df_dinuc2) %>% 
+    #---- filter SNVs --------#
+    filter(mut_type == 'SNV') %>% 
+    #---- select columns -----#
+    mutate(Normal_Reads1 = '.', Normal_Reads2 = '.', Normal_Var_Freq = '.', 
+           Tumor_Reads1 = '.', Tumor_Reads2 = '.', Tumor_Var_Freq = '.',
+           Chr = str_c('chr', chrom)) %>% 
+    #----- Split DINUC to SNVs -----#
+    dplyr::select(Sample, Chr, Start = pos_start, End = pos_end, Ref = ref, Alt = alt, 
+                  Normal_Reads1, Normal_Reads2, Normal_Var_Freq, 
+                  Tumor_Reads1, Tumor_Reads2, Tumor_Var_Freq) %>% 
+    distinct() %>% 
+    #---- write by sample ----#
+    group_by(Sample) %>% 
+    group_map( ~ write_tsv(.x, paste0(store_path, .y$Sample, '_SNV.txt') ), .keep =F )
+  
+}
+
+# function: merge adjacent SNVs to DINUC
+merge_SNV <- function(df){
+  
+  df_nc_temp = df %>% filter(mut_type == 'SNV') %>% 
+    arrange(Sample, chrom, pos_start) %>% 
+    select(Sample, chrom, pos_start, ref, alt) %>% 
+    mutate(pos_start = pos_start-1)
+  
+  df_nc_dinuc = df %>% filter(mut_type == 'SNV') %>% 
+    inner_join(df_nc_temp, by=c('Sample','chrom', 'pos_start')) %>% 
+    unite('ref', ref.x, ref.y,  sep = '') %>% 
+    unite('alt', alt.x, alt.y, sep = '') %>% 
+    mutate(mut_type = 'DINUC')
+  
+  df_dup_snv = df_nc_dinuc %>%  
+    bind_rows(df_nc_dinuc %>% mutate(pos_start = pos_start + 1))  %>% 
+    select(Sample, chrom, pos_start) %>% 
+    mutate(dupSNV = 1)
+  
+  df_nc_forSig = df %>%  left_join(df_dup_snv) %>% 
+    filter(is.na(dupSNV)) %>% 
+    select(-dupSNV) %>% bind_rows(df_nc_dinuc)
+  
+  return(df_nc_forSig)
+}
+
+```
+
+## 1. Our_Data
+
+Our datasets have three BNHL: 
+1. The SNVs are called by five tools, and if >=2 tools agree, then the mutations was kept
+2. The Indel are also called by the multi tools, but we need to add the Platypus Indel in which was verfied in our lab before that it is a good Indel calling software. Thus, if the Indels were both called by multi-tools and Platypus, then the indels in the multi-tools will be kept, and the unique indels from Platypus will be added. 
+3. DLBCL and FL's reference used hg38, while MCL used hg19.
+4. For SigProfile: split SNV to SNV+DINUC and merge INDEL; For Kataegis: use SigProfile to grep SNV+DINUC and seperate DINUC to SNV
+
+### Our DLBCL - hg19 (~/project/Kataegis/)
+
+```{r our DLBCL}
+mydir = '0.data/1_OurData/DLBCL/rawdata/'
+
+# read snv
+df_our_dlbcl_snv = map2_df(str_subset(list.files(mydir),'.*SNV.txt'), mydir,  read.single.SNV ) %>% 
+  transmute(Project = 'Our_DLBCL', Sample = Sample, ID = '.', 
+            Genome = 'GRCh37', mut_type = 'SNV',  chrom = Chr, 
+            pos_start = Position, pos_end = Position, 
+            ref = Ref, alt = Alt, Type = 'SOMATIC')
+
+# split snv and dinuc
+df_our_dlbcl_m = merge_SNV(df_our_dlbcl_snv)
+
+# read indel (need duplicated)
+df_our_dlbcl_indel = map2_df(str_subset(list.files(mydir),'.*Indel.txt'), mydir,  read.single.SNV ) 
+df_our_dlbcl_indel = df_our_dlbcl_indel %>% distinct() %>% 
+  transmute(Project = 'Our_DLBCL', Sample = Sample, ID = '.', 
+            Genome = 'GRCh37', mut_type = 'INDEL',  chrom = Chr, 
+            pos_start = Position, pos_end = Position, 
+            ref = Ref, alt = Alt, Type = 'SOMATIC')
+
+# write forSigProfile
+df_our_dlbcl = bind_rows(df_our_dlbcl_m, df_our_dlbcl_indel)
+write_tsv(df_our_dlbcl, '0.data/1_OurData/DLBCL/forSigProfile/Our_DLBCL.wgs.txt')
+
+length(unique(df_our_dlbcl$Sample))
+```
+
+
+
+### Our DLBCL - hg38 (~/Users/huwan/OneDrive - KI.SE/Mac/Project/202206_Kataegis)
+
+```{r our DLBCL}
+mydir = '0.data/1_OurData/DLBCL/rawdata/'
+dir.create('0.data/1_OurData/DLBCL/forSigProfile')
+dir.create('0.data/1_OurData/DLBCL/forKataegis')
+
+# read SNVs and Indels
+df_our_dlbcl_snv = map2_df(str_subset(list.files(mydir),'.*.txt.gz'), mydir, read.single.SNV ) %>% 
+  transmute(Project = 'Our_DLBCL', Sample = Sample, ID = '.', 
+            Genome = 'GRCh38', mut_type = mut_type,  chrom = Chr, 
+            pos_start = Start, pos_end = End, 
+            ref = Ref, alt = Alt, Type = 'SOMATIC') %>% 
+  filter(chrom %in% chroms) %>% 
+  distinct() 
+
+# filter out mutations in ChrY in the female samples if the clinic data are avaliable
+female.list = phe$Sample[phe$Gender == 'Female']
+df_our_dlbcl_snv = df_our_dlbcl_snv %>% filter(! (chrom == 'chrY' & Sample %in% female.list))
+
+length(unique(df_our_dlbcl_snv$Sample))
+
+# split snv and dinuc
+df_our_dlbcl_m = merge_SNV(df_our_dlbcl_snv) %>% rownames_to_column('RowNumber') 
+
+
+# covert GRCh38 to GRCh37
+write_tsv(df_our_dlbcl_m %>% select(chrom, pos_start, pos_end, RowNumber), 
+             '0.data/1_OurData/DLBCL/DLBCL.GRCh38.bed', col_names = F)
+### use https://genome.ucsc.edu/cgi-bin/hgLiftOver to covert -> GRCh37coverted.bed
+df_dlbcl_Pos37 = read_tsv('0.data/1_OurData/DLBCL/DLBCL.GRCh37.bed',col_names = F) %>% 
+  filter(X1 %in% chroms)
+
+df_our_dlbcl_m_hg19 =  df_our_dlbcl_m %>% 
+  right_join(df_dlbcl_Pos37 %>% select(X1, X2, X3, RowNumber = X4) %>% mutate(RowNumber = as.character(RowNumber))) %>% 
+  mutate(chrom = X1, pos_start = X2, pos_end = X3) %>% 
+  select(-RowNumber, -X1,  -X2, -X3)  %>% 
+  mutate(Genome = 'GRCh37')  %>% mutate(pos_end = pos_start + str_length(ref) - 1)
+
+# write forSigProfile
+write_tsv(df_our_dlbcl_m_hg19, '0.data/1_OurData/DLBCL/forSigProfile/Our_DLBCL.wgs.txt')
+
+# # write forKataegis
+# write_kataegis(df_our_dlbcl_m_hg19, '0.data/1_OurData/DLBCL/forKataegis/')
+
+
+length(unique(df_our_dlbcl_m_hg19$Sample))
+```
+
+
+We also have 12  pairs of samples sequenced by BGI CG platform which data could be used from JEM paper
+(~/Users/huwan/OneDrive - KI.SE/Mac/Project/202205_JEM_reproduce)
+
+```{r DLBCL CG platform}
+old_dlbcl = read_tsv('~/OneDrive - KI.SE/Mac/Project/Kataegis/0.data/1_OurData/DLBCL/forSigProfile/Our_DLBCL.wgs.txt')
+CG_samples = setdiff(unique(old_dlbcl$Sample), unique(df_our_dlbcl_m_hg19$Sample)) 
+length(CG_samples)
+
+cg_dlbcl_hg19 = old_dlbcl %>% filter(Sample %in% CG_samples)  %>% mutate(pos_end = pos_start + str_length(ref) - 1)
+
+write_tsv(cg_dlbcl_hg19,  '0.data/1_OurData/DLBCL/Our_DLBCL_CG.wgs.txt')
+
+write_tsv(bind_rows(df_our_dlbcl_m_hg19,cg_dlbcl_hg19), '0.data/1_OurData/DLBCL/forSigProfile/Our_DLBCL.wgs.txt')
+# write_kataegis(bind_rows(df_our_dlbcl_m_hg19, cg_dlbcl_hg19), '0.data/1_OurData/DLBCL/forKataegis/')
+
+length(unique(bind_rows(df_our_dlbcl_m_hg19,cg_dlbcl_hg19) %>% pull(Sample)))
+
+CG_samples = read_tsv('0.data/1_OurData/DLBCL/Our_DLBCL_CG.wgs.txt')  %>% pull(Sample)
+```
+
+
+
+### Our FL hg38 (~/Users/huwan/OneDrive - KI.SE/Mac/Project/202206_Kataegis)
+
+```{r Our FL}
+mydir = './0.data/1_OurData/FL/rawdata/'
+dir.create('0.data/1_OurData/FL/forSigProfile')
+dir.create('0.data/1_OurData/FL/forKataegis')
+
+# read snv
+df_our_fl_snv = map2_df(str_subset(list.files(mydir),'.*.txt.gz'), mydir, read.single.SNV ) %>% 
+  transmute(Project = 'Our_FL', Sample = Sample, ID = '.', 
+            Genome = 'GRCh38', mut_type = mut_type,  chrom = Chr, 
+            pos_start = Start, pos_end = End, 
+            ref = Ref, alt = Alt, Type = 'SOMATIC') %>% 
+  filter(chrom %in% chroms) %>% 
+  distinct()
+
+length(unique(df_our_fl_snv$Sample))
+female.list = phe$Sample[phe$Gender == 'Female']
+df_our_fl_snv = df_our_fl_snv %>% filter(! (chrom == 'chrY' & Sample %in% female.list))
+
+# split snv and dinuc
+df_our_fl_m = merge_SNV(df_our_fl_snv) %>% rownames_to_column('RowNumber')
+
+
+# covert GRCh38 to GRCh37
+write_tsv(df_our_fl_m %>% select(chrom, pos_start, pos_end, RowNumber), 
+            '0.data/1_OurData/FL/FL.GRCh38.bed', col_names = F)
+### use https://genome.ucsc.edu/cgi-bin/hgLiftOver to covert -> GRCh37coverted.bed
+df_fl_Pos37 = read_tsv('0.data/1_OurData/FL/FL.GRCh37.bed',col_names = F) %>%  
+  filter(X1 %in% chroms) 
+
+
+df_our_fl_m_hg19 =  df_our_fl_m   %>% 
+  right_join(df_fl_Pos37 %>% select(X1, X2, X3, RowNumber = X4) %>% mutate(RowNumber = as.character(RowNumber))) %>% 
+  mutate(chrom = X1, pos_start = X2, pos_end = X3) %>% 
+  select(-RowNumber, -X1,  -X2, -X3) %>% 
+  mutate(Genome = 'GRCh37')  %>% mutate(pos_end = pos_start + str_length(ref) - 1)
+
+
+
+# write forSigProfile
+write_tsv( df_our_fl_m_hg19, '0.data/1_OurData/FL/forSigProfile/Our_FL.wgs.txt')
+length(unique(df_our_fl_m_hg19$Sample))
+table(df_our_fl_m_hg19$mut_type)
+
+# write_kataegis(df_our_fl_m_hg19, '0.data/FL/forKataegis/')
+
+```
+
+
+### Our MCL hg19 (~/Users/huwan/OneDrive - KI.SE/Mac/Project/202206_Kataegis)
+```{r our MCL}
+# read snv
+mydir = '0.data/1_OurData/MCL/rawdata//'
+dir.create('0.data/1_OurData/MCL/forSigProfile')
+dir.create('0.data/1_OurData/MCL/forKataegis')
+
+df_our_mcl_snv = map2_df(str_subset(list.files(mydir),'.*.txt'), mydir, read.single.SNV ) %>% 
+  transmute(Project = 'Our_MCL', Sample = Sample, ID = '.', 
+            Genome = 'GRCh37', mut_type = mut_type,  chrom = Chr, 
+            pos_start = Start, pos_end = End, 
+            ref = Ref, alt = Alt, Type = 'SOMATIC') %>% 
+  distinct()
+
+# split snv and dinuc
+df_our_mcl_m = merge_SNV(df_our_mcl_snv)
+
+
+write_tsv(df_our_mcl_m, '0.data/1_OurData/MCL/forSigProfile/Our_MCL.wgs.txt')
+#write_kataegis(df_our_mcl_m, '0.data/1_OurData/MCL/forKataegis/')
+
+# 
+# # write forSigProfile
+# df_our_mcl = bind_rows(df_our_mcl_m, df_our_mcl_indel)
+# write_tsv(df_our_mcl, '0.data/MCL/forSigProfile/Our_MCL.wgs.txt')
+
+# write_tsv(df_our_mcl %>%  filter(mut_type != 'INDEL') %>% mutate(chrom = str_remove(chrom, 'chr')) %>% 
+#             select(`Sample name` = Sample, Chromosome = chrom, Position = pos_start,  `Original base` = ref, `Mutated base` = alt), 
+#           '~/project/202205_JEM_reproduce/0.data/MCL/MCL.forSignal.wgs.txt', col_names = F)
+
+
+
+# # write forKataegis
+# write_kataegis(df_our_mcl_m, '0.data/MCL/forKataegis/')
+
+length(unique(df_our_mcl_m$Sample))
+
+```
+
+
+
+
+## ICGC (~/project/Kataegis/)
+
+### BNHL
+
+For BNHL, ICGC have two WGS dataset: DLBL-US (7) and MALY-DE (200+). ANd the spcimen table provide grade info to subtyping DLBCL and FL. Besides, MALY-DE have 41 common samples with 2018_DLBCL_NatCom which futhur gives Cell original (COO) info. For duplicated DLBCL,we keep the duplicate sample (40 have COO) with GCB/ABC/U info to 2018_DLBCL_NatCom dataset to include detailed subtype and consistent SNV calling method. 
+
+- read data
+```{r read ICGC BNHL}
+## read SNV
+df_icgc_dlbc = read_icgc('0.data/2_ICGC/BNHL/rawdata/simple_somatic_mutation.open.DLBC-US.tsv') 
+length(unique(df_icgc_dlbc$Sample)) # 7
+df_icgc_maly = read_icgc('0.data/2_ICGC/BNHL/rawdata/simple_somatic_mutation.open.MALY-DE.tsv') %>% filter(chrom %in% str_c('chr', c(1:24,'X','Y'))) %>% 
+  merge_SNV()
+length(unique(df_icgc_maly$Sample)) # 241
+
+# read clinic and then use specimen's tumor grade to subtyping
+
+# read 2018_DLBCL_NatCom to reduplicate
+phe_nc = readxl::read_excel('0.data/2018_DLBCL_NatCom/rawdata/41467_2018_6354_MOESM3_ESM.xlsx', sheet = 1)  %>% 
+  filter(`WGS data` == 1) %>% 
+  select(Sample = `Case ID`, COO = `Cell-of-origin (COO)`) 
+
+phe_maly = read_tsv('0.data/2_ICGC/BNHL/rawdata/specimen.MALY-DE.tsv' ) %>% 
+  select(Sample = icgc_donor_id, tumour_grade) %>% 
+  filter(Sample %in% df_icgc_maly$Sample) %>% 
+  mutate(Subtype = if_else(grepl('FL', tumour_grade), 'FL',
+                           if_else(grepl('DLBCL', tumour_grade), "DLBCL", "unknown"))) %>% 
+  select(Sample, Subtype) %>% 
+  left_join(phe_nc, by = c('Sample')) %>% 
+  mutate(Subtype = if_else(!is.na(COO), 'DLBCL', Subtype)) %>% 
+  distinct() %>% 
+  filter(Subtype != 'unknown')
+
+```
+
+- DLBCL (all in ICGC)
+```{r ICGC DLBCL duplicated }
+# DLBCL all icgc duplicated with 2018_DLBCL_NatCom
+df_icgc_dlbcl = bind_rows(df_icgc_maly %>% filter(Sample %in% phe_maly$Sample[phe_maly$Subtype == 'DLBCL']), df_icgc_dlbc) 
+
+write_tsv(df_icgc_dlbcl, '0.data/2_ICGC/BNHL/forSigProfile/ICGC_DLBCL.wgs.txt') 
+write_kataegis(df_icgc_dlbcl, '0.data/2_ICGC/BNHL/forKataegis/')
+
+length(unique(df_icgc_dlbcl$Sample)) # 72
+
+
+```
+
+- DLBCL reduplicate
+```{r ICGC DLBCL reduplicated}
+# DLBCL reduplicate
+df_icgc_dlbcl_noNC = df_icgc_dlbcl %>% filter(! Sample %in% phe_maly$Sample[!is.na(phe_maly$COO)])
+
+write_tsv(df_icgc_dlbcl_noNC, '0.data/2_ICGC/BNHL/forSigProfile/ICGC_DLBCL_noOverlapWith2018.wgs.txt') 
+write_kataegis(df_icgc_dlbcl_noNC, '0.data/2_ICGC/BNHL/forKataegis/')
+
+
+length(unique(df_icgc_dlbcl_noNC$Sample)) # 32
+```
+
+
+- FL
+```{r ICGC FL}
+# FL
+df_icgc_fl = df_icgc_maly %>% filter(Sample %in% phe_maly$Sample[phe_maly$Subtype == 'FL']) 
+
+write_tsv(df_icgc_fl, '0.data/2_ICGC/BNHL/forSigProfile/ICGC_FL.wgs.txt') 
+write_kataegis(df_icgc_fl, '0.data/2_ICGC/BNHL/forKataegis/')
+
+length(unique(df_icgc_fl$Sample)) # 101
+```
+
+
+- unknow_BNHL
+
+```{r ICGC BNHL}
+# unknown-BNHL
+df_icgc_un = df_icgc_maly %>% filter(! Sample %in% phe_maly$Sample) 
+
+write_tsv(df_icgc_un, '0.data/2_ICGC/BNHL/forSigProfile/ICGC_BNHL-unknown.wgs.txt') 
+write_kataegis(df_icgc_un, '0.data/2_ICGC/BNHL/forKataegis/')
+
+length(unique(df_icgc_un$Sample)) # 75
+```
+
+### CLL
+
+ICGC have 151 CLL samples, while among 150 CLL have IGHV-mutated/unmutated subtype info from 2015_CLL_Nature, so we remove 1 sample without IGHV mutated info.
+
+```{r ICGC CLL}
+
+# Clinic table: 2015_CLL_nature: may overlap with ICGC_CLL N = 150
+df_cll_2015 = read_tsv('0.data/2_ICGC/CLLE/rawdata/PMID26200345_supplementaryTable2.tsv')
+
+phe_icgc_cll = read_tsv('0.data/2_ICGC/CLLE/rawdata/sample.CLLE-ES.tsv') %>% 
+  select(CASE = submitted_donor_id, Sample = icgc_donor_id) %>% distinct() %>% 
+  filter(Sample %in% df_icgc_cll$Sample)
+
+phe_icgc2igmut = df_cll_2015 %>% select(CASE, Subtype = `CLL/MBL`, IGHV) %>% 
+  distinct() %>% right_join(phe_icgc_cll)
+
+samp_cll = unique(phe_icgc_cll$Sample[phe_icgc_cll$CASE %in% df_cll_2015$CASE]) ## 150
+
+write_tsv(phe_icgc2igmut %>% filter(Sample %in% samp_cll), '0.data/2_ICGC/CLLE/rawdata/IGHmutated_subtype_from2015nature.tsv', na = '')
+
+
+# for SigProfile: SNV + DINUC + INDEL
+df_icgc_cll = read_icgc('0.data/2_ICGC/CLLE/rawdata/simple_somatic_mutation.open.CLLE-ES.tsv') %>% 
+  filter(Sample %in% samp_cll)
+write_tsv(df_icgc_cll, '0.data/2_ICGC/CLLE/forSigProfile/ICGC_CLL.wgs.txt')
+
+# for Kataegis: SNV (including splitted DINUC)
+write_kataegis(df_icgc_cll, '0.data/2_ICGC/CLLE/forKataegis/')
+
+length(unique(df_icgc_cll$Sample)) # 150
+
+```
+
+
+
+## 2018 DLBCL Nature communication (~/project/Kataegis/)
+
+We just remove 1 sample without COO info but the sample is in ICGC DLBCL dataset. Besides, raw SNVs in this datasets not only include SNVs but also DINUCs, so we need to split them for forSigProfile.
+
+```{r 2018_DLBCL_NatCom}
+## clinic data
+phe_nc_simple = phe_nc  %>% filter(! is.na(COO))
+write_tsv(phe_nc_simple, '0.data/2018_DLBCL_NatCom/rawdata/clinic_subtype_simple.tsv', na = '')
+
+## forSigProfile
+df_nc = read_tsv('0.data/2018_DLBCL_NatCom/rawdata/41467_2018_6354_MOESM4_ESM')
+table(df_nc$Chromosome)
+df_nc_m = df_nc %>% 
+  filter(Tumor_Sample_Barcode %in% phe_nc_simple$Sample,
+         Chromosome %in% c(1:22, 'X', 'Y')) %>% 
+  mutate( Type = 'SOMATIC',  chrom = str_c('chr', Chromosome),
+          Project = '2018_DLBCL_NatCom', ID = '.', Genome = 'GRCh37',
+          mut_type = if_else(Variant_Type == 'SNP', 'SNV', 'INDEL')) %>% 
+  select(Project,  Sample = Tumor_Sample_Barcode, ID ,  Genome, 
+         mut_type ,  chrom , 
+         pos_start = Start_Position, pos_end = End_Position, 
+         ref = Reference_Allele, alt = Tumor_Seq_Allele2, Type) %>% 
+  distinct() 
+
+
+df_nc_forSig = merge_SNV(df_nc_m)
+
+write_tsv(df_nc_forSig, '0.data/2018_DLBCL_NatCom/forSigProfile/2018_DLBCL_NatCom.wgs.txt')
+write_kataegis(df_nc_m, '0.data/2018_DLBCL_NatCom/forKataegis/')
+
+length(unique(df_nc_forSig$Sample))  # 152
+
+```
+
+
+## 2020_MCL_BLOOD (~/project/Kataegis/)
+
+Ask the author to get the somaticMut_table via email.
+
+```{r 2020_MCL_BLOOD}
+## read data
+phe_mcl = readxl::read_excel('0.data/2020_MCL_BLOOD/rawdata/2020-MCL WGS-BOOLD-suppl2.xlsx', sheet = 2, skip = 1)
+df_mcl = read_tsv('0.data/2020_MCL_BLOOD/rawdata/somaticMut_MCL_Blood2020.tsv', col_types = c(Chrom = 'c') )
+
+## for SigProfile
+df_mcl_SigPro = df_mcl %>% 
+  mutate(Project = '2020_MCL', ID = '.', Genome = 'GRCh37', Type = 'SOMATIC', chrom = str_c('chr', Chrom), 
+         mut_type = if_else(MutClass == 'snvs', 'SNV',
+                            if_else(MutClass == 'indels', 'INDEL', 'DINUC'))) %>% 
+  dplyr::select(Project,  Sample = Case , ID ,  Genome, 
+                mut_type,  chrom ,  pos_start = Position , pos_end = Position, 
+                ref = Ref , alt = Alt, Type) %>% 
+  distinct()
+write_tsv(df_mcl_SigPro, '0.data/2020_MCL_BLOOD/forSigProfile/2020_MCL_Blood.wgs.txt')
+
+## forKataegis
+write_kataegis(df_mcl_SigPro, '0.data/2020_MCL_BLOOD/forKataegis/')
+
+length(unique(df_mcl_SigPro$Sample))  ##61
+
+```
+
+## 2020_MM_NatComm (~/project/Kataegis/)
+https://www.nature.com/articles/s41467-020-15740-9#Sec21
+note:the paitents have multiple time points from diagnosis and/or relapse.
+The mutation data was sent by last author via PAN's asking (2021-12-03)
+
+```{r 2020_MCL_BLOOD}
+## read data
+phe_mm = readxl::read_excel('0.data/2020_MM_NatCom/rawdata/41467_2020_15740_MOESM4_ESM.xlsx', sheet = 1, skip = 2)
+df_mm = read_tsv('0.data/2020_MM_NatCom/rawdata/MM_WGS_SNV_Pan.txt' )
+
+
+phe_mm_select = phe_mm %>%  filter(sample %in% df_mm$sampleID) %>% 
+  select(Sample = sample, Stage, Donor = patient, Age, Gender) %>% 
+  mutate(Disease = 'MM', Project = '2020_MM')
+write_tsv(phe_mm_select, '0.data/2020_MM_NatCom//2020_MM_NatCom.SelectedPheno.txt')
+
+# indel got at 20240327
+indel_mm = read_tsv('0.data/2020_MM_NatCom/rawdata/indels_mm.txt') %>% 
+  select(-NO) %>% 
+  transmute(Project = '2020_MM', Sample = Sample, ID = '.', Genome = 'GRCh37', mut_type = 'INDEL', 
+              chrom = str_c('chr', Chrom),  pos_start = Pos, pos_end = Pos + str_length(Ref) - 1,
+              ref = Ref, alt = Alt, Type = 'SOMATIC')
+write_tsv(indel_mm, '1_Signature/Combine/Matrix/input/MM.indel.txt')
+
+
+## for SigProfile
+df_mm_SigPro = df_mm %>% filter(sampleID %in% phe_mm_select$Sample) %>%  
+  mutate(Project = '2020_MM', ID = '.', Genome = 'GRCh37', Type = 'SOMATIC', chrom = chr,mut_type = 'SNV') %>%  
+  dplyr::select(Project,  Sample = sampleID , ID ,  Genome, 
+                mut_type,  chrom ,  pos_start = pos , pos_end = pos, 
+                ref , alt , Type) %>% 
+  distinct() %>% 
+  bind_rows(indel_mm)
+write_tsv(df_mm_SigPro, '0.data/2020_MM_NatCom/forSigProfile//2020_MM_NatCom.wgs.txt')
+
+## forKataegis
+write_kataegis(df_mm_SigPro, '0.data/2020_MM_NatCom/forKataegis/')
+
+length(unique(df_mm_SigPro$Sample))  ##77
+length(unique(phe_mm_select$Donor))  ##51
+
+```
+
+
+### merge datasets
+- merge mutations
+```{r}
+# df_all = bind_rows(bind_rows(df_our_dlbcl_m_hg19,cg_dlbcl_hg19), 
+#                    df_our_fl_m_hg19, df_our_mcl_m,
+#                    df_icgc_dlbcl_noNC, df_icgc_fl, df_icgc_un, df_icgc_cll,
+#                    df_nc_forSig, df_mcl_SigPro, df_mm_SigPro)
+
+
+df_all = bind_rows(
+  read_tsv('0.data/1_OurData/DLBCL/forSigProfile/Our_DLBCL.wgs.txt'),
+  read_tsv('0.data/1_OurData/FL/forSigProfile/Our_FL.wgs.txt'),
+  read_tsv('0.data/1_OurData/MCL/forSigProfile/Our_MCL.wgs.txt'),
+  read_tsv('0.data/2_ICGC/forSigProfile/ICGC_DLBCL.wgs.txt'),
+  read_tsv('0.data/2_ICGC/forSigProfile/ICGC_FL.wgs.txt'),
+  read_tsv('0.data/2_ICGC/forSigProfile/ICGC_CLL.wgs.txt'),
+  read_tsv('0.data/2_ICGC/forSigProfile/ICGC_BNHL-unknown.wgs.txt'),
+  read_tsv('0.data/2018_DBLCL_NatCom/forSigProfile/2018_DLBCL_NatCom.wgs.txt'),
+  read_tsv('0.data/2020_MCL_BLOOD/forSigProfile/2020_MCL_Blood.wgs.txt'),
+  read_tsv('0.data/2020_MM_NatCom/forSigProfile/2020_MM_NatCom.wgs.txt')
+) %>% 
+  mutate(chrom = if_else(!grepl('chr', chrom ), str_c('chr', chrom), chrom)) %>% 
+  filter(chrom %in% str_c('chr', c(1:22, 'X', 'Y')))  %>%
+  mutate(pos_end = pos_start + str_length(ref) - 1)
+                  
+
+write_tsv(df_all %>% mutate(Project = 'all') , '1_Signature/Combine/all.wgs.txt') 
+write_tsv(df_all  , '1_Signature/Combine/all.wgs.txt') 
+
+length(unique(df_all$Sample)) # 932
+```
+
+
+- Clinic data
+```{r}
+# phe_our = read_excel('0.data/1_OurData/TableS1_SubtypeInfo.xlsx', sheet = 1, skip = 1)  %>%
+#   select(Sample, Subtype = `(Sub)type`, IGHV = `IGHV mutations number`) %>% 
+#   mutate(Disease = if_else(Subtype == 'FL', 'FL', 'DLBCL'),
+#          Subtype = if_else(Subtype == 'UC', 'U', 
+#                            if_else(Subtype == 'FL' , '', Subtype)), 
+#          IGHV = as.character(IGHV))  %>% 
+#   bind_rows(data.frame(Sample = unique(df_our_mcl$Sample), Disease = 'MCL', Subtype = 'cMCL'))
+
+
+phe_ourDL =  read_excel('0.data/1_OurData/Clinical data 20221117.xlsx', sheet = 1)  %>%
+  select(Sample = `Sample ID`, Subtype_from_source = `Molecular subtype`, Gender, Stage = `Ann Arbor Stage`,
+         Age, `IPI score`, HBSAg) %>% 
+  mutate(Disease = 'DLBCL',
+         HBSAg = if_else( HBSAg == '+', 'HBV', 'No'),
+         Subtype = if_else( Subtype_from_source == 'GCB', 'GCB-DLBCL',
+                                               if_else(Subtype_from_source == 'non-GCB', 'ABC-DLBCL', 'U-DLBCL') ))
+
+
+
+phe_icgc = data.frame(Sample = unique(df_icgc_dlbcl_noNC$Sample), Disease = 'DLBCL', Subtype = 'n/a')  %>% 
+  bind_rows(data.frame(Sample = unique(df_icgc_fl$Sample), Disease = 'FL')) %>% 
+  bind_rows(data.frame(Sample = unique(df_icgc_un$Sample), Disease = 'BNHL')) %>% 
+  bind_rows(phe_icgc2igmut %>% select(-CASE) %>% mutate(Disease = 'CLL')) 
+
+
+phe_all = bind_rows(phe_our, phe_icgc) %>% 
+  bind_rows(phe_nc_simple %>% select(Sample, Subtype = COO) %>%  mutate(Disease = 'DLBCL'))  %>% 
+  bind_rows(phe_mcl %>% select(Sample = Case, Subtype) %>% filter(!is.na(Subtype)) %>%  mutate(Disease = 'MCL')) %>% 
+  bind_rows(phe_mm_select %>% select(Sample, Subtype) %>% filter(!is.na(Subtype)) %>%  mutate(Disease = 'MM' )) %>% 
+  right_join(df_all %>% select(Sample, Project) %>% distinct())
+
+# need to check the Project in MM, when combine new Our DLBCL and FL.
+phe_all = phe_all %>% mutate(Source = if_else(grepl('Our', Project), 'Our', 
+                                              if_else(Project == '2018_DLBCL_NatCom', 'Paper_DLBCL',
+                                                      if_else(Project == '2020_MCL', 'Paper_MCL', 
+                                                              if_else(Project == '2020_MM', 'Paper_MM',
+                                                                      'ICGC')))))
+
+write_tsv(phe_all, file = '0.data/Subtype.tsv', na = '')
+
+table(phe_all$Disease)
+table(phe_all$Subtype[phe_all$Disease == 'DLBCL'])
+table(phe_all$Subtype[phe_all$Disease == 'MCL']) 
+table(phe_all$Subtype[phe_all$Disease == 'CLL'])
+table(phe_all$IGHV[phe_all$Disease == 'CLL'])
+```
+
+
+
+### Duplicated Dataset OR UNsuffiecient Datasets
+```{r discard}
+# 4. 2019 BL BLOOD : Not all somatic snvs in supplementary.
+## read data
+df_bl = read_excel('0.data/2019_BL_BLOOD/rawdata/2019-BL WGS-BLOOD-suppl2.xlsx',sheet = 2, skip = 2)
+
+## covert GRCh38 to GRCh37
+df_bl_Pos38 = df_bl %>% mutate(Range = str_c(CHROM, ':', POS, '-', POS)) %>% 
+  pull(Range)
+write_lines(df_bl_Pos38, '0.data/2019_BL_BLOOD/rawdata/2019_BL_GRCh38.chr_start_end.txt')
+### use https://genome.ucsc.edu/cgi-bin/hgLiftOver to covert -> 2019_BL_GRCh37coverted.bed
+df_bl_Pos37 = read_tsv('0.data/2019_BL_BLOOD/rawdata/2019_BL_GRCh37coverted.bed',col_names = 'GRCh37')
+
+df_bl_m =  df_bl_Pos37 %>% bind_cols(df_bl) %>% 
+  dplyr::select(GRCh37, ref = REF, alt = ALT, matches('\\d')) %>% 
+  gather(Sample, IsMut, -GRCh37, -ref, -alt)  %>% 
+  filter(IsMut != 0) %>% 
+  separate(GRCh37, c('chrom', 'pos_start', 'pos_end'), sep = '[:-]')
+
+## forSigProfile
+df_bl_SigPro = df_bl_m %>% 
+  mutate(Project = '2019_BL', ID = '.', Genome = 'GRCh37', Type = 'SOMATIC',
+         chrom = str_remove(chrom, 'chr'),
+         mut_type = if_else(str_length(ref) == 1 & str_length(alt) == 1, 'SNV',
+                            if_else(str_length(ref) == 2 & str_length(alt) == 2, 'DINUC', 'INDEL'))) %>% 
+  dplyr::select(Project,  Sample , ID ,  Genome, 
+         mut_type ,  chrom ,  pos_start , pos_end, 
+         ref , alt, Type) %>% 
+  distinct()
+write_tsv(df_bl_SigPro, '0.data/2019_BL_BLOOD/forSigProfile/2019_BL_Blood.wgs.txt')
+
+## forKataegis
+df_bl_forKata = df_bl_m %>% 
+  #---- filter SNVs --------#
+  filter(str_length(ref) == 1, str_length(alt) == 1) %>% 
+  #---- select columns -----#
+  mutate(Normal_Reads1 = '.', Normal_Reads2 = '.', Normal_Var_Freq = '.', 
+         Tumor_Reads1 = '.', Tumor_Reads2 = '.', Tumor_Var_Freq = '.') %>% 
+  dplyr::select(Sample, Chr = chrom, Start = pos_start, End = pos_end, Ref = ref, Alt = alt, 
+                Normal_Reads1, Normal_Reads2, Normal_Var_Freq, 
+                Tumor_Reads1, Tumor_Reads2, Tumor_Var_Freq) %>% 
+  distinct() %>% 
+  #---- write by sample ----#
+  group_by(Sample) %>% 
+  group_map( ~ write_tsv(.x, paste0('0.data/2019_BL_BLOOD/forKataegis/', .y$Sample, '_SNV.txt') ), .keep =F )
+
+
+###---------DUP----- #####
+#PCAWG -- including in ICGC
+df = read_tsv('0.data/2020_PCAWG/rawdata/Lymph-BNHL.snv_mnv_indel.icgc.maf',  col_types = cols(.default = "c"),
+              col_names = c('chrom', 'pos_start', 'pos_end', 'strand', 'mut_type', 'ref', 'alt', 'Project', 'Sample')) %>% 
+  mutate(ID = '.', Genome = 'GRCh37', Type = 'SOMATIC') %>%
+  select(Project, Sample, ID, Genome, chrom:pos_end, mut_type:alt, Type, strand) 
+
+write_tsv(df %>%  select(-strand), '0.data/2020_PCAWG/subdata/BNHL/all.txt')
+
+df %>%  group_by(Sample) %>%  # batch write
+  group_map( ~ write_tsv(.x, paste0('0.data/2020_PCAWG/BNHL/', .y$Sample, '.txt') ), .keep =T )
+
+
+
+###---------DUP----- #####
+
+```
+
+
+ 
+```{r merge mutation data 20220606}
+df_all_old = read_tsv('~/project/Kataegis/1_Signature/Combine/all.wgs.txt')
+
+length(unique(df_all_old$Sample))
+
+# replace Our_Data with new data
+df_all = df_all_old %>% filter(! grepl('Our', Project)) %>% 
+  bind_rows(read_tsv('0.data/1_OurData/forSigProfile/Our_DLBCL.wgs.txt')) %>% 
+  bind_rows(read_tsv('0.data/1_OurData/forSigProfile/Our_FL.wgs.txt')) %>% 
+  bind_rows(read_tsv('0.data/1_OurData/forSigProfile/Our_MCL.wgs.txt')) %>% 
+  bind_rows(read_tsv('0.data/2020_MM_NatCom/forSigProfile/2020_MM_NatCom.wgs.txt'))  
+
+length(unique(df_all$Sample))
+
+write_tsv(df_all, '1_Signature/Combine/Matrix/all.wgs.txt')
+
+```
+
+```{r merge pheno data }
+phe_old = read_tsv('~/project/Kataegis/0.data/Sample_subtype.tsv') %>% filter(Source != 'Our') %>% select(-IGHV) 
+
+phe_our = read_tsv('~/project/202205_JEM_reproduce/0.data/phenotype_data/pheno.pairsWGS.n200.xls') %>% 
+  mutate(Project = 'Our', Source = 'Our', Subtype_from_source = Subtype, 
+         Donor = str_remove(Sample, '[DR]\\d?'), 
+         Subtype = if_else(Subtype == 'non-GCB', 'ABC-DLBCL',
+                           if_else(Subtype == 'GCB',  "GCB-DLBCL", 
+                                   if_else(Subtype == 'U-DLBCL',"un-DLBCL",
+                                           if_else(Subtype == 'MCL', 'cMCL',Subtype)))))
+
+
+phe_mm = read_tsv('~/project/Kataegis/0.data/2020_MM_NatCom/2020_MM_NatCom.SelectedPheno.txt')  %>% 
+  mutate(Subtype = 'MM', Source = 'Project')
+
+#phe_mcl = readxl::read_excel('~/project/Kataegis/0.data/2020_MCL_BLOOD/rawdata/2020-MCL WGS-BOOLD-suppl2.xlsx', sheet = 1, skip = 1)  # no clinic data
+# phe_dlblc # no clinic data in 2018_DLBCL
+
+phe_icgc = read_tsv('~/project/Kataegis/0.data/2_ICGC/BNHL/rawdata/donor.MALY-DE.tsv') %>%  
+  select(Sample = icgc_donor_id, Gender = donor_sex, Age = donor_age_at_diagnosis, Stage = donor_tumour_stage_at_diagnosis_supplemental, 
+         Status = donor_vital_status,  OS= donor_survival_time, PFS = donor_interval_of_last_followup ) %>% 
+  bind_rows(read_tsv('~/project/Kataegis/0.data/2_ICGC/BNHL/rawdata/donor.DLBC-US.tsv') %>% 
+                select(Sample =icgc_donor_id, Gender = donor_sex, Age = donor_age_at_diagnosis, Stage = donor_tumour_stage_at_diagnosis_supplemental, 
+         Status = donor_vital_status,  OS= donor_survival_time, PFS = donor_interval_of_last_followup )) %>% 
+  bind_rows(read_tsv('~/project/Kataegis/0.data/2_ICGC/CLLE/rawdata/donor.CLLE-ES.tsv') %>% 
+                select(Sample =icgc_donor_id, Gender = donor_sex, Age = donor_age_at_diagnosis, Stage = donor_tumour_stage_at_diagnosis_supplemental, 
+         Status = donor_vital_status,  OS= donor_survival_time, PFS = donor_interval_of_last_followup ))
+
+
+phe_all  = phe_old %>% left_join(phe_icgc)  %>% 
+  bind_rows(phe_mm, phe_our)
+write_tsv(phe_all, '0.data/Sample_clinicInfo.tsv', na = '')
+
+```
+
+
+## split Ig and non-Ig mutations 202405
+```{r split Ig and non-Ig}
+df_all = read_tsv('1_Signature/Combine/Matrix/input/all.wgs.txt')
+
+ref_ig = read_tsv('_Ref/Ig_segment.hg19.txt') %>% group_by(Chr) %>% summarise(start = min(Start, End), end = max(Start, End))
+
+df_ig = df_all %>% filter(chrom == 'chr2', between(pos_start, 89156877, 90274265 ) | between(pos_end, 89156877, 90274265 ) ) %>% bind_rows(df_all %>% filter(chrom == 'chr14', between(pos_start, 106053274, 107288051 ) | between(pos_end, 106053274, 107288051 ))) %>% bind_rows(df_all %>% filter(chrom == 'chr22', between(pos_start, 22380474, 23265067 ) | between(pos_end, 22380474, 23265067 )))
+
+dir.create('1_Signature/Combine/Ig')
+write_tsv(df_ig %>% mutate(Project = 'Ig'), '1_Signature/Combine/Ig/Ig.wgs.txt')
+
+df_nonIg = df_all %>% left_join(df_ig %>% transmute(chrom, pos_start, pos_end, Region = 'Ig')) %>% filter(is.na(Region))
+
+dir.create('1_Signature/Combine/nonIg')
+write_tsv(df_nonIg %>% select(-Region) %>% mutate(Project = 'nonIg'), '1_Signature/Combine/nonIg/nonIg.wgs.txt')
+```
+
+
+Generate matrix in Mac
+```{bash}
+conda activate wgs
+SigProfilerMatrixGenerator matrix_generator nonIg GRCh37 ./
+SigProfilerMatrixGenerator matrix_generator Ig GRCh37 ./
+```
+
+
+De novo extraction of signatures in Uppmax
+/proj/snic2020-6-100/private/huwan/scRNA/MCL_scRNAseq/MCL_workplace/Ig/
+/proj/snic2020-6-100/private/huwan/scRNA/MCL_scRNAseq/MCL_workplace/nonIg/
+
+
+Overall mutational pattern 
+```{r mutPattern}
+mut_ig = read_tsv('1_Signature/Combine/Ig/output/SBS/Ig.SBS96.all')
+mut_ig_one = mut_ig %>% gather(Sample, MutNum, -MutationType) %>% 
+  group_by(MutationType) %>% summarise(Total_Ig = sum(MutNum))
+
+
+mut_nonIg = read_tsv('1_Signature/Combine/nonIg/output/SBS/nonIg.SBS96.all')
+mut_nonig_one = mut_nonIg %>% gather(Sample, MutNum, -MutationType) %>% 
+  group_by(MutationType) %>% summarise(Total_nonIg = sum(MutNum))
+
+
+# plot
+plot_sbs(mut_ig_one %>% left_join(mut_nonig_one) %>% rename(MutationsType = MutationType), ncol = 1)
+eoffice::topptx(last_plot( ),filename = plot_file, w = 4, h = 3 ,append = T )
+
+
+
+```
+
+

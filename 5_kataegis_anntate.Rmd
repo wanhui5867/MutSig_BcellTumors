@@ -1,0 +1,837 @@
+---
+title: "kataegis_annotate"
+author: "hui.wan"
+date: "06/07/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, tidy=TRUE, cache=TRUE)
+knitr::opts_knit$set(root.dir = '~/OneDrive - Karolinska Institutet/Documents/Project/Kataegis_2023/Results/rm_apobec_kataegis')
+
+```
+
+# Introduction
+
+This is an R Markdown document to analysis and visulation of B cell tumors' kataegis.
+Previously, we analyzed the kataegis from WGS mutations. Sequently, the high proportion of APOBEC (TCN motif) mutations were removed from the kataegis, and them the rest kataegis were perfomred signature analysis. Finally, we got 2 kataegis' signatures. 
+
+Here, we need to anntate the gene location of these kataegis, and analyse corresponding K1 contribution. The main steps include: 
+1. K1 contribution of each mutation. Firstly, find the upstream and downstream of the mutation; secondly, accroding the contribution of sample's activity and 96 mutation's signature to calculate.
+2. Ig region annotation. The difficult thing is to merge the region??? and split Em and Sm mutation, then is to calculate the nearest TSS distance.
+3. non-Ig region annotation. ANNORVAR annotation and then calculate the TSS distance.
+
+```{r load packages}
+library(tidyverse)
+library(cowplot)
+library(ggpubr)
+library(eoffice)
+library(coop)
+library(rstatix)
+library(RColorBrewer)
+library(ggsci)
+library(Biostrings) # getSeq
+library(tibbletime) # rollify
+library(splitstackshape)
+library(ggseqlogo)
+library(universalmotif) # random create sequences
+```
+
+
+# Process
+
+## 1. calcuation K1 contribution for each mutation
+
+### get the upstream and downstream base of the mutation. Total 3 is for calculating the contribution. Total 5 is for Motif.
+
+```{r}
+library(Biostrings)
+library(BSgenome.Hsapiens.UCSC.hg19)
+
+phe = read_tsv('../../0.data/SequencingPerformance.xls') 
+df_mut = read_tsv('kataegis_sep.wgs.txt')
+dir.create('Annotation')
+
+df_mut_cplt = df_mut %>% filter(!is.na(alt), !is.na(ref)) %>% 
+  rowwise() %>%
+  mutate(Content = toupper(getSeq(Hsapiens,chrom, pos_start-1, pos_start+1)),
+         Content5 = toupper(getSeq(Hsapiens,chrom, pos_start-2, pos_start+2)),
+         type = if_else(ref %in% c('A','G'), toupper(complement(DNAString(str_c(ref, alt, sep = '-')))) , str_c(ref, alt, sep = '-')),
+         subtype = if_else(ref %in% c('A','G'), toupper(reverseComplement(DNAString(Content))), Content),
+         Content5_complement = if_else(ref %in% c('A','G'), toupper(reverseComplement(DNAString(Content5))), Content5),
+         MutationType = str_c(str_sub(subtype, 1,1), '[', str_replace(type, '-', '>' ), ']', str_sub(subtype, -1,-1)))
+
+write_tsv(df_mut_cplt, 'Annotation/kataegis_seq.complement.tsv')
+df_mut_cplt = read_tsv('Annotation/kataegis_seq.complement.tsv')
+df_mut_cplt = read_tsv('../../2_Kataegis/kataegis_sep.wgs.subtype.txt') %>% 
+  mutate(SampleID = str_remove_all(Sample, '\\|.*')) %>% 
+  filter(SampleID %in% phe$Sample) %>% select(-SampleID)
+
+
+```
+
+
+### calculate K1 contribution
+```{r read data}
+df_sig = read_tsv('SBS96_2_Signatures//Signatures/SBS96_S2_Signatures.txt') 
+names(df_sig) = c('MutationType', 'per_SigK2', 'per_SigK1')
+df_act = read_tsv('SBS96_2_Signatures/Activities/SBS96_S2_NMF_Activities.txt')
+names(df_act) = c('kataegis_id', 'N_mut_SigK2', 'N_mut_SigK1')
+
+```
+
+- calculate the K1_contribution = (K1_per * K1_N)/ (K1_per * K1_N + K2_per * K2_N)
+```{r mutation_K1}
+df_mut_k1 = df_mut_cplt %>% select(kataegis_id = Sample, chrom, position = pos_start, ref, alt, MutationType, Content5_complement) %>% 
+  left_join(df_act) %>% left_join(df_sig ) %>% 
+  mutate(K1_cont =  per_SigK1*N_mut_SigK1,
+         K2_cont = per_SigK2*N_mut_SigK2,
+         K1_contribution = K1_cont /(K1_cont + K2_cont),
+         kataegis_source = if_else(K1_contribution >= 0.75, 'K1',
+                                   if_else(K1_contribution <= 0.25, 'K2', 'NA')))
+
+hist(df_mut_k1$K1_contribution)
+sum(is.na(df_mut_k1$kataegis_source))/length(df_mut_k1$K1_contribution)
+```
+
+###  plot Seqlogo of K1 and K2
+ if K1_contribution >=0.75, the mutation is from K1; else K1_contribution <=0.25, it is from K2; otherwise, the middle (~ 10%) can be discard
+```{r}
+# K1 mutations
+df_mut_k1 %>% filter(K1_contribution >= 0.75) %>% pull(Content5_complement)  %>% ggseqlogo()
+write_lines(df_mut_k1 %>% filter(K1_contribution >= 0.75) %>% pull(Content5_complement), 'K1_seq.txt')
+
+df_mut_k1 %>% filter(K1_contribution <= 0.25) %>% pull(Content5_complement)  %>% ggseqlogo()
+write_lines(df_mut_k1 %>% filter(K1_contribution <= 0.25) %>% pull(Content5_complement), 'K2_seq.txt')
+
+# K apobec
+read_tsv('../../2_Kataegis/apobec_kataegis/Matrix/kataegis_apobec.wgs.subtype.txt') %>% pull(Content5_complement)  %>% ggseqlogo()
+write_lines(read_tsv('../../2_Kataegis/apobec_kataegis/Matrix/kataegis_apobec.wgs.subtype.txt') %>% pull(Content5_complement), 'Kapobec_seq.txt')
+
+# random 5000 sequences
+random_seq= create_sequences(alphabet = "DNA", seqnum = 5000, seqlen = 5,   nthreads = 1, rng.seed = 1221) 
+write_lines(as.vector(random_seq), 'random_seq5000.txt')
+
+```
+ 
+put k1/k2_seq.txt and random_seq5000.txt on the two sample logo website: http://www.twosamplelogo.org/
+parameter: DNA , output: 12 * 5 300dpi   ttest p<0.05 
+kat_apobec =  read_tsv('Results/all_kataegis/3.kataegis.shower.tsv') 
+
+
+```{r kataegis_K1}
+df_kat_k1 = df_mut_k1 %>% group_by(kataegis_id) %>% 
+  summarise(K1_contribution = mean(K1_contribution),
+            N_mut_K1 = sum(kataegis_source == 'K1'), 
+            N_mut_K2 = sum(kataegis_source == 'K2' ))
+
+# check the diff between kataegis_all and seperate mutations
+tt = df_act %>% left_join(df_kat_k1 ) %>% mutate(diff= K1_contribution - (N_mut_SigK1/(N_mut_SigK1 + N_mut_SigK2)))
+hist(abs(tt$diff))
+
+write_tsv(df_kat_k1 %>% filter(!is.na(K1_contribution)) %>% 
+            mutate(K_source = if_else(K1_contribution >= 0.75, 'K1',
+                                                  if_else(K1_contribution <= 0.25, 'K2', 'Unassigned'))),
+          './K1contribution.perKataegis.tsv')
+
+```
+
+
+
+
+```{r sample_K1}
+dir.create('Annotation')
+phe = read_tsv('../../0.data/SequencingPerformance.xls')
+
+df_spl_k1 = df_mut_k1 %>% mutate(Sample = str_remove_all(kataegis_id, '\\|.*')) %>%  
+  group_by(Sample) %>% 
+  summarise(K1_contribution = mean(K1_contribution, na.rm = T)) %>% 
+  left_join(phe)
+
+write_tsv(df_spl_k1, 'Annotation/sample_mean_k1.tsv', na = '')
+
+
+df_spl_k1_num = df_kat_k1 %>% filter(!is.na(K1_contribution)) %>% ungroup() %>% 
+    mutate(Sample = str_remove_all(kataegis_id, '\\|.*')) %>% 
+    mutate(K_source = if_else(K1_contribution >= 0.75, 'K1',
+                                                  if_else(K1_contribution <= 0.25, 'K2', 'Unassigned'))) %>% 
+  group_by(Sample, K_source) %>% summarise(N = n_distinct(kataegis_id)) %>% 
+  mutate(K_source = str_c('N_kataegis', K_source, sep = '_')) %>% 
+  spread(K_source, N, fill = 0)
+  
+tt_kat = df_sum %>% select(Sample , N_kataegis, N_kataegis_APOBEC) %>% left_join(df_spl_k1_num) %>% 
+  mutate(N_kataegis_APOBEC = if_else(is.na(N_kataegis_APOBEC) , 0, N_kataegis_APOBEC)) 
+
+write_tsv(tt_kat, './Results/rm_apobec_kataegis/kataegis_number.seperateKtype.perSample.tsv', na = '0')
+
+```
+
+
+
+- read data
+```{r}
+df_shower = read_tsv('../../2_Kataegis/3.kataegis.shower.tsv') %>%
+  rowwise() %>% 
+  mutate(kataegis_id = str_c(Sample, Chr, index, sep = '|')) %>% 
+  filter(kataegis_id %in% df_mut_cplt$Sample)
+
+ref_ig = read_tsv('~/OneDrive - KI.SE/Mac/Project/Kataegis/_Ref/Ig_segment.hg19.txt') %>% arrange(Chr, index)
+
+
+sum_shower = df_shower %>% left_join(df_act) %>% 
+  group_by(Sample) %>% 
+  summarise(N_kataegis = length(unique(kataegis_id)),
+            N_kataegis_mutations = sum(mutation_number),
+            Exposure_signature_K1 = sum(N_mut_SigK1),
+            Exposure_signature_K2 = sum(N_mut_SigK2)) %>% 
+  left_join(df_spl_k1 %>% select(Sample, K1_contribution))  # Need modify
+write_tsv(sum_shower, 'Annotation/Summary_sample_kataegis.xls', na = '')
+
+```
+
+## 2. Ig annotation
+
+-functions
+```{r}
+##  annot all  regions of kataegis
+ig_annot <- function(chr, start, end){
+  # chr = 'chr2'
+  # start = 89164175
+  # end = 89165460
+
+  
+   df_flag = ref_ig %>% filter(Chr == chr) %>% 
+     gather(Orient, Pos, -Chr, -Gene, -index) %>% 
+    mutate(flag_s = if_else(Pos - start <= 0 , -1,1), 
+           flag_e = if_else(Pos - end  <= 0 ,-1, 1),
+           flag = flag_s + flag_e) 
+   
+   # if range is across several regions
+   if ( any(df_flag$flag == 0) ) {
+     regions =  df_flag %>% filter(flag == 0 ) %>% 
+       mutate(Gene = str_c(index, Gene,sep = ':')) %>% 
+       pull(Gene) %>% unique() %>% str_c(collapse =  ',')
+   } else {
+     regions =  df_flag %>% arrange(Pos) %>% 
+       filter(flag_s != lag(flag_s) | flag_s != lead(flag_s) ) %>% 
+       mutate(Gene = str_c(index, Gene,sep = ':')) %>% 
+       pull(Gene) %>% unique() %>% str_c(collapse =  ',')
+   }
+     
+  
+}
+
+```
+
+- annotate raw 
+```{r}
+df_shower_ig = df_shower %>% rowwise() %>% 
+  mutate(Igregion_order = ig_annot(Chr, Pos_start, Pos_end),
+         Igregion = str_remove_all(Igregion_order,'\\d+\\:')) %>% 
+  filter( Igregion != '') 
+```
+
+
+###  non-S region
+
+```{r}
+df_ig_nonS = df_shower_ig %>% rowwise() %>% 
+  filter(!grepl('S', Igregion)) %>% 
+  mutate(start = min(as.numeric(str_remove(unlist(str_split(Igregion_order,  ',')), ':.*'))),
+         end = max(as.numeric(str_remove(unlist(str_split(Igregion_order,  ',')), ':.*'))),
+         range = paste0(start,',',end)) %>% 
+  arrange(Chr,start, end)  %>% 
+  ungroup() 
+```
+
+
+
+### nonS and nonV_J
+```{r}
+
+roll_diff <- rollify( ~ .x[2] - .y[1], window = 2 )
+
+kat_merge_nonS = df_ig_nonS %>% 
+  filter( ! (grepl('V', Igregion) & grepl('C|J', Igregion))) %>% 
+  mutate(subtype = str_remove(str_remove(Igregion, '\\d.*'), '\\(.*'),
+         subtype = if_else(grepl('IGK[LC]',subtype), 'IGKJ-C', 
+                           if_else(grepl('IGL[JC]', subtype), 'IGLJ-C', 
+                                   if_else(!grepl('^IG', subtype), 'S',subtype)))) %>% 
+  group_by(Chr,subtype) %>%  
+  mutate(diff1 = c(roll_diff(start, end)[2], roll_diff(start, end)[-1])) %>% 
+  mutate(lag_diff = if_else(diff1 >0, 1, 0)) %>% 
+  mutate(bin = cumsum(lag_diff)) %>% 
+  group_by(Chr, subtype, bin) %>% 
+  mutate(bin_start = min(start), bin_end = max(end)) %>% 
+  left_join(ref_ig %>% select(Chr, bin_start = index, Gene_start = Gene)) %>% 
+  left_join(ref_ig %>% select(Chr, bin_end = index, Gene_end = Gene)) %>% 
+  ungroup() %>% rowwise() %>% 
+  mutate(Igrange = str_c(unique(c(Gene_start, Gene_end)), collapse =  ' to ')) %>% 
+  mutate(Igrange = if_else(grepl('Em', Igrange),  'IGHJ-Em', Igrange),
+         Igrange = if_else(grepl('IGKJ\\d to IGKC', Igrange), 'IGKJ to IGKC', Igrange))   %>% 
+  # some region only in IGH C region, these should be replaced to according S region ?? (right)
+  mutate(Igrange = if_else(grepl('^C', Igrange), str_replace(Igrange, 'C', 'S'), Igrange)) %>% 
+  left_join(df_kat_k1, by = 'kataegis_id') %>% 
+  select(kataegis_id,  Pos_start, Pos_end , mutation_number, Igrange, K1_contribution )
+
+kat_merge_nonS = kat_merge_nonS %>% left_join(df_kat_k1 %>% select(kataegis_id, N_mut_K1, N_mut_K2))
+
+```
+
+
+### Split IGL V_J
+```{r}
+# V and J together
+df_ig_vj = df_ig_nonS %>% filter(grepl('V', Igregion), grepl('C|J', Igregion)) %>% pull(kataegis_id)
+loci_lj1 =  ref_ig %>% filter(Gene == 'IGLV3-1') %>% pull(End) 
+loci_kj1 =  ref_ig %>% filter(Gene == 'IGKV4-1') %>% pull(Start) 
+vl3_1_region = kat_merge_nonS %>% filter(grepl('IGLV3-1$',Igrange)) %>% pull(Igrange) %>% unique()
+vk41_region = kat_merge_nonS %>% filter(grepl('IGKV4-1$',Igrange)) %>% pull(Igrange) %>% unique()
+
+# kataegis cross V and J region, we need to seperate it
+kat_vj = df_mut_k1 %>% filter(kataegis_id %in% df_ig_vj) %>% 
+  mutate(Igrange = if_else(chrom == 'chr2', 
+                           if_else(position > loci_kj1, vk41_region, 'IGKJ to IGKC'),
+                           if_else(position <= loci_lj1, vl3_1_region, 'IGLJ1 to IGLC3'))) %>% 
+  group_by(kataegis_id, Igrange) %>% 
+  summarise(mutation_number = n(), K1_contribution = mean(K1_contribution),
+            Pos_start = min(position), Pos_end = max(position),
+            N_mut_K1 = sum(kataegis_source == 'K1'), N_mut_K2 = sum(kataegis_source == 'K2' )) %>% 
+  filter(mutation_number >= 10) 
+```
+
+
+
+
+### Split Sm and Em 
+- split mutation in Em-Sm, and calculate the K1 contribution
+
+```{r}
+# data
+df_sm_em = df_shower_ig %>% rowwise() %>%  filter(grepl('Em', Igregion), grepl('Sm', Igregion)) 
+loci_sm = ref_ig %>% filter(Gene == 'Sm') %>% pull(End)
+
+kat_sm_em = df_mut_k1 %>% 
+  filter(kataegis_id %in% df_sm_em$kataegis_id) %>%
+  mutate(Igrange = if_else(position <= loci_sm, 'Sm', 'IGHJ-Em')) %>% 
+  group_by(kataegis_id, Igrange) %>% 
+  summarise(mutation_number = n(), K1_contribution = mean(K1_contribution),
+            Pos_start = min(position), Pos_end = max(position),
+            N_mut_K1 = sum(kataegis_source == 'K1'), N_mut_K2 = sum(kataegis_source == 'K2' )) %>% 
+  filter(mutation_number >= 10) 
+
+```
+
+
+### Other S region
+```{r}
+kat_igh_S_raw = df_shower_ig %>% rowwise() %>%  filter(grepl('S', Igregion), !grepl('Em', Igregion)) %>% 
+  # remove C region (Cm, Cg, Ce, Ca)
+  mutate(Igrange = str_remove_all(Igregion, ',?C[mgae]\\d?,?')) 
+
+# there are some Se,Sa2 mutations 
+df_se_sa2 = kat_igh_S_raw %>% filter(Igrange == 'SeSa2')
+loci_sa2 = ref_ig %>% filter(Gene == 'Sa2') %>% pull(End)
+
+kat_se_sa2 = df_mut_k1 %>% 
+  filter(kataegis_id %in% df_se_sa2$kataegis_id) %>%
+  mutate(Igrange = if_else(position <= loci_sa2, 'Se', 'Sa2')) %>% 
+  group_by(kataegis_id, Igrange) %>% 
+  summarise(mutation_number = n(), K1_contribution = mean(K1_contribution),
+            Pos_start = min(position), Pos_end = max(position),
+            N_mut_K1 = sum(kataegis_source == 'K1'), N_mut_K2 = sum(kataegis_source == 'K2' )) %>% 
+  filter(mutation_number >= 10) 
+
+kat_igh_S = kat_igh_S_raw %>% 
+    filter(!kataegis_id %in% df_se_sa2$kataegis_id) %>%
+   select(one_of(names(kat_se_sa2))) %>% 
+  left_join(df_kat_k1) %>% 
+  bind_rows(kat_se_sa2)  
+
+
+```
+
+
+### merge ig
+```{r}
+kat_ig = kat_merge_nonS %>% 
+  # bind other S region
+  bind_rows(kat_igh_S) %>% 
+  # add  K1 contribution
+  # bind Em-Sm region
+  bind_rows(kat_sm_em) %>% 
+  #bind IGK/L V_J region
+  bind_rows(kat_vj) %>% 
+  # statistic the sample number of each Igrange
+  separate(kataegis_id, c('Sample', 'Chr', 'index'), sep = '\\|', remove = F) %>% 
+  group_by(Igrange) %>% mutate(n_sample = length(unique(Sample))) %>% ungroup()
+
+
+write_tsv(kat_ig, 'IgAnnotat.tsv', na = '')
+kat_ig = read_tsv('IgAnnotat.tsv')
+
+```
+
+
+### add Ig TSS
+- make Ig TSS file
+```{r}
+Ig_gene_tss = read_tsv('~/OneDrive - KI.SE/Mac/Project/Kataegis/_Ref/Ig_segment.hg19.txt') %>% 
+  mutate(TSS = if_else(Chr == 'chr2', Start, End),
+         strand = if_else(Chr == 'chr2', '+', '-')) %>% 
+  select(Chr,strand, TSS, Gene )
+write_tsv(Ig_gene_tss, '~/OneDrive - KI.SE/Mac/Project/Kataegis/_Ref/hg19.IGgene.tss.tsv')
+```
+
+- calculate the nearest TSS
+```{r}
+Ig_gene_tss = read_tsv('~/OneDrive - KI.SE/Mac/Project/Kataegis/_Ref/hg19.IGgene.tss.tsv') 
+
+df_ig_tss = kat_ig  %>% group_by(Chr, Igrange) %>% 
+  summarise(Start = min(Pos_start), End = max(Pos_end))  %>% 
+  mutate(Gene = str_remove_all(Igrange, ' .*')) %>%  # need double check it is calculate the first gene' upstream
+  left_join(Ig_gene_tss %>% select(Chr, Gene, TSS), by = c('Chr', 'Gene')) %>% 
+  left_join(ref_ig %>% select(Gene, Index = index)) %>% 
+  rowwise() %>% 
+  mutate(Dist_TSS = if_else(between(TSS, Start, End), 0, min(abs(TSS-Start), abs(TSS-End)))) %>% 
+  group_by(Igrange, Index) %>% 
+  summarise(Dist_TSS = min(Dist_TSS)) %>% 
+  mutate(Dist_TSS = if_else(grepl('S|m', Igrange), 0, Dist_TSS),
+         Index = if_else(is.na(Index), ref_ig %>% filter(Gene == 'Em') %>% pull(index), Index))
+
+```
+
+
+- heatmap of Ig
+```{r}
+kat_ig_plot = kat_ig %>% 
+  group_by(Sample, Igrange,  Chr, n_sample) %>% 
+  summarise( K1_contribution = mean(K1_contribution)) %>% 
+  spread(Sample, K1_contribution) %>% 
+  arrange(Chr)  %>% 
+  left_join(df_ig_tss)
+
+
+write_tsv(kat_ig_plot, 'Annotation/IgAnnotat_for_heatmap.tsv', na = '')
+
+```
+
+
+## non_Ig region
+
+First, prepare the kataegis region to annotate gene by ANNOVAR
+```{r}
+df_shower_nonIg = df_mut_cplt %>% filter(! Sample %in% df_shower_ig$kataegis_id)  %>% 
+  select(chrom, pos_start, pos_end, ref, alt, Sample)
+write_tsv(df_shower_nonIg, 'Annotation/kataegis.nonIg.avinput')
+```
+
+
+RUN annovar : /proj/snic2020-6-100/private/20201101_Kataegis/kataegis_annovar
+```{bash}
+module load bioinfo-tools
+module load annovar
+module load annovar_data
+
+annotate_variation.pl -geneanno -dbtype refGene -buildver hg19 kataegis.nonIg.avinput $ANNOVAR_DATA/humandb
+```
+
+
+- make ref gene tss
+```{r}
+ref_gene_tss =  read_tsv('~/OneDrive - KI.SE/Mac/Project/Kataegis/_Ref/hg19_refGene.txt' ) %>% 
+  mutate(TSS = if_else(strand == '+', txStart, txEnd)) %>% 
+  select(chrom, strand, TSS, Gene = name2) %>% distinct()
+write_tsv(ref_gene_tss, '~/OneDrive - KI.SE/Mac/Project/Kataegis/_Ref//hg19.refgene.tss.tsv')
+ref_gene_tss = read_tsv( '~/OneDrive - KI.SE/Mac/Project/Kataegis/_Ref//hg19.refgene.tss.tsv')
+
+
+```
+
+
+```{r}
+df_annot_nonIg = read_tsv('Annotation//kataegis.nonIg.avinput.variant_function',
+                        col_names = c('Region', 'Gene', 'Chr','Start', 'End', 'Ref', 'Alt', "kataegis_id"))
+
+offtarget_list = read_lines('~/OneDrive - KI.SE/Mac/Project/Kataegis/_Ref/AID_offtarget.list')
+
+```
+
+
+```{r}
+df_nonIg_tmp =  df_annot_nonIg %>% 
+  mutate(Gene = str_remove_all(Gene, ',?NONE\\(dist=NONE\\),?')) %>% 
+  separate(Gene , c('Gene1', 'Gene2'), sep = ',') %>% 
+  # calculate diss #
+  mutate(Dist1 = if_else(grepl('dist=', Gene1),  str_remove(str_extract(Gene1, 'dist=\\d+'), 'dist='), '0'),
+         Dist2 = if_else(grepl('dist=', Gene2),  str_remove(str_extract(Gene2, 'dist=\\d+'), 'dist='), '0'),
+         Dist1 = as.numeric(Dist1), Dist2 = as.numeric(Dist2)) %>% 
+  # gene name #
+  mutate(Gene1 = str_remove_all(Gene1, '\\(.*'),
+         Gene2 = str_remove_all(Gene2, '\\(.*'),
+         Gene2 = str_remove_all(Gene2, '^NM_.*')) %>% 
+  ## unique kataegis ##
+  rowwise() %>% 
+  mutate(Gene = if_else(is.na(Gene2) , Gene1, if_else(Dist1 <= Dist2, Gene1, Gene2)),
+         Dist = min(Dist1, Dist2, na.rm = T)) %>% 
+  ##3 kataegis in one gene and one rna , then merge it to gene #
+  group_by(kataegis_id) %>% 
+  mutate(Gene_RNA = if_else(length(unique(Gene)) >1  & between(sum(grepl('LINC|LOC', unique(Gene))) , 1, length(unique(Gene)) -1), 
+                               str_c(unique(Gene), collapse = ';'), 'NC' )) %>% 
+  ungroup() %>% mutate(Gene = if_else(Gene_RNA == 'NC', Gene, str_remove_all(Gene_RNA, ';?LINC\\d+;?|;?LOC\\d+;?'))) %>% 
+  # continue unique kataegis # 
+  group_by(kataegis_id, Gene, Chr) %>% 
+  summarise(number_mutations = n(), Dist = min(Dist, na.rm = T), 
+            pos_start = min(Start), pos_end = max(Start)) 
+
+
+df_nonIg = df_nonIg_tmp %>%  
+  # if kataegis seperate in two genes and each gene's mutation < 10 then merge genes #
+  ungroup() %>% group_by(kataegis_id, Chr) %>% 
+  filter(all(number_mutations < 10 )) %>% 
+  summarise(Gene = str_c(Gene, collapse = ';'), number_mutations = sum(number_mutations), 
+            Dist = min(Dist), pos_start = min(pos_start), pos_end = max(pos_end) ) %>% 
+  bind_rows(df_nonIg_tmp %>% filter(number_mutations >= 10) ) %>% 
+  filter(!is.na(Gene)) %>% 
+  # statistic 
+  left_join(df_kat_k1 ) 
+
+# calcuate Dist of TSS
+df_nonIg_tss = df_nonIg %>% 
+  cSplit('Gene',  sep = ';', 'long') %>% 
+  left_join(df_nonIg %>% select(kataegis_id, Gene_m = Gene)) %>% 
+  group_by(Gene_m, Gene) %>% 
+  summarise(pos_start = min(pos_start), pos_end = max(pos_end)) %>% 
+  # calculate TSS #
+  left_join(ref_gene_tss) %>% ungroup() %>% 
+  rowwise() %>% 
+  mutate(Dist_TSS = if_else(between(TSS, pos_start, pos_end), 0, min(abs(pos_start - TSS), abs(pos_end - TSS)) )) %>% 
+  group_by(Gene_m) %>% summarise(Dist_TSS = min(Dist_TSS)) %>% select(Gene = Gene_m, Dist_TSS)
+
+```
+
+
+
+- heatmap for nonIG
+```{r}
+df_nonIg_plot = df_nonIg %>% 
+  mutate(Sample = str_remove_all(kataegis_id, '\\|.*')) %>% 
+  left_join(df_nonIg_tss ) %>% 
+  group_by(Gene) %>% 
+  mutate(n_sample = length(unique(Sample)))  %>% 
+  group_by(Sample, Chr, Gene, n_sample,  Dist_TSS) %>% 
+  summarise( K1_contribution = mean(K1_contribution)) %>% 
+  mutate(AID_offtarget = if_else(Gene %in% offtarget_list, 1, 0)) %>% 
+  # filter
+  # select(Sample, Gene, n_sample, Dist, K1_contribution )  %>% 
+  spread(Sample, K1_contribution) %>% 
+  arrange(Dist_TSS,-n_sample, Chr) %>% 
+  ungroup() %>% 
+  mutate(Index = row_number())
+
+write_tsv(df_nonIg_plot, 'Annotation/nonIgAnnotat_for_heatmap.tsv')
+df_nonIg_plot = read_tsv('Annotation/nonIgAnnotat_for_heatmap.tsv')
+```
+
+
+## merge Ig and nonIg
+-merge heatmap
+```{r}
+df_plot = df_nonIg_plot %>% ungroup()  %>% 
+  mutate(Group = if_else(Dist_TSS <= 2000, 'Non-Ig <=2kb', 'Non-Ig >2kb')) %>% 
+  bind_rows(kat_ig_plot %>% mutate(Group = if_else(Chr == 'chr14','IGH', if_else(Chr == 'chr2', 'IGK', 'IGL'))) %>% 
+              select(Gene = Igrange, everything())) %>% 
+  arrange(Group, Index) %>%  
+  filter(!duplicated(Gene)) %>%  # take care: why have the duplicate genes
+ identity()
+
+write_tsv(df_plot, 'Annotation/kataegis_region.forheatmap.xls', na = '')  
+
+# check old samples
+old_sample_list = phe %>% filter(Source == 'Our', Disease %in% c('DLBCL', 'FL')) %>% pull(Sample)
+write_tsv(df_plot %>% select( Chr:AID_offtarget, Index:Group, one_of(old_sample_list)), 
+          'Annotation/kataegis_region.forheatmap.check.oldsamples.xls', na = '')  
+
+```
+
+
+
+
+
+## APOBEC kataegis
+```{r}
+df_mut_apobec =  read_tsv('../../2_Kataegis/apobec_kataegis/Matrix/kataegis_apobec.wgs.txt') 
+write_tsv(df_mut_apobec %>%   select(chrom, pos_start, pos_end, ref, alt, Sample), 'Annotation/kataegis.apobec.avinput') # for mutation annotation
+
+
+# plot apobec kataegis 
+df_shower_apobec =  df_shower  %>% filter(kataegis_id %in% df_mut_apobec$Sample) 
+dim(df_shower_apobec)
+```
+
+
+
+```{r}
+df_annot_apobec= read_tsv('Annotation//kataegis.apobec.avinput.variant_function',
+                        col_names = c('Region', 'Gene', 'Chr','Start', 'End', 'Ref', 'Alt', "kataegis_id"))
+
+
+# annotated kategis: Function copy from non-Ig
+df_apobec_tmp =  df_annot_apobec %>% 
+  mutate(Gene = str_remove_all(Gene, ',?NONE\\(dist=NONE\\),?')) %>% 
+  separate(Gene , c('Gene1', 'Gene2'), sep = ',') %>% 
+  # calculate diss #
+  mutate(Dist1 = if_else(grepl('dist=', Gene1),  str_remove(str_extract(Gene1, 'dist=\\d+'), 'dist='), '0'),
+         Dist2 = if_else(grepl('dist=', Gene2),  str_remove(str_extract(Gene2, 'dist=\\d+'), 'dist='), '0'),
+         Dist1 = as.numeric(Dist1), Dist2 = as.numeric(Dist2)) %>% 
+  # gene name #
+  mutate(Gene1 = str_remove_all(Gene1, '\\(.*'),
+         Gene2 = str_remove_all(Gene2, '\\(.*'),
+         Gene2 = str_remove_all(Gene2, '^NM_.*')) %>% 
+  ## unique kataegis ##
+  rowwise() %>% 
+  mutate(Gene = if_else(is.na(Gene2) , Gene1, if_else(Dist1 <= Dist2, Gene1, Gene2)),
+         Dist = min(Dist1, Dist2, na.rm = T)) %>% 
+  ##3 kataegis in one gene and one rna , then merge it to gene #
+  group_by(kataegis_id) %>% 
+  mutate(Gene_RNA = if_else(length(unique(Gene)) >1  & between(sum(grepl('LINC|LOC', unique(Gene))) , 1, length(unique(Gene)) -1), 
+                               str_c(unique(Gene), collapse = ';'), 'NC' )) %>% 
+  ungroup() %>% mutate(Gene = if_else(Gene_RNA == 'NC', Gene, str_remove_all(Gene_RNA, ';?LINC\\d+;?|;?LOC\\d+;?'))) %>% 
+  # continue unique kataegis # 
+  group_by(kataegis_id, Gene, Chr) %>% 
+  summarise(number_mutations = n(), Dist = min(Dist, na.rm = T), 
+            pos_start = min(Start), pos_end = max(Start)) 
+
+df_apobec = df_apobec_tmp %>%  
+  # if kataegis seperate in two genes and each gene's mutation < 10 then merge genes #
+  ungroup() %>% group_by(kataegis_id, Chr) %>% 
+  filter(all(number_mutations < 10 )) %>% 
+  summarise(Gene = str_c(Gene, collapse = ';'), number_mutations = sum(number_mutations), 
+            Dist = min(Dist), pos_start = min(pos_start), pos_end = max(pos_end) ) %>% 
+  bind_rows(df_apobec_tmp %>% filter(number_mutations >= 10) ) 
+write_tsv(df_apobec, 'Annotation/kataegis.apobec.annot.tsv')
+
+## any gene related to apobec?
+ddf_apobec.gene = df_apobec_tmp %>% mutate(Sample = str_remove_all(kataegis_id, '\\|.*')) %>% group_by(Gene) %>% summarise(N_sample = n_distinct(Sample)) %>% arrange(-N_sample)
+write_tsv(ddf_apobec.gene, 'Annotation/kataegis.apobec.geneFreq.tsv')
+
+# calcuate Dist of TSS
+df_apobec_tss = df_apobec %>% 
+  cSplit('Gene',  sep = ';', 'long') %>% 
+  left_join(df_apobec %>% select(kataegis_id, Gene_m = Gene)) %>% 
+  group_by(Gene_m, Gene) %>% 
+  summarise(pos_start = min(pos_start), pos_end = max(pos_end)) %>% 
+  # calculate TSS #
+  left_join(ref_gene_tss) %>% ungroup() %>% 
+  rowwise() %>% 
+  mutate(Dist_TSS = if_else(between(TSS, pos_start, pos_end), 0, min(abs(pos_start - TSS), abs(pos_end - TSS)) )) %>% 
+  group_by(Gene_m) %>% summarise(Dist_TSS = min(Dist_TSS)) %>% select(Gene = Gene_m, Dist_TSS)
+
+```
+
+
+- summary kataegis, ignore V subgene family
+```{r}
+# long
+df_shower_annot = 
+  # ig annoted 
+  kat_ig %>% cSplit("Igrange", ',', 'long') %>% 
+  mutate(IgVDJ =  if_else(grepl('[VDJC]', Igrange), 
+                          str_replace_all(str_remove_all(str_remove_all(Igrange, '\\d.*(\\d)?'), '\\(.*'), '-', ','),  Igrange))  %>% 
+  group_by(kataegis_id) %>% summarise(Target = str_c(unique(IgVDJ), collapse = ',') ) %>% 
+  mutate(Kategis_group = if_else(grepl('chr14', kataegis_id), 'IGH',
+                                 if_else(grepl('chr22', kataegis_id), 'IGL', 'IGK'))) %>% 
+  # non-ig annotated
+  bind_rows(df_nonIg %>%  filter(! kataegis_id %in% df_shower_apobec$kataegis_id, ! kataegis_id %in% kat_ig$kataegis_id) %>% group_by(kataegis_id) %>% 
+              summarise(Target = str_c(Gene, collapse = ',')) %>%
+              mutate(Kategis_group = if_else(Target %in% offtarget_list, 'AID_offtarget', 'other_nonIg'))   )  %>% 
+  right_join(df_shower %>% select(Sample, Chr,Pos_start, Pos_end,mutation_number , kataegis_id))  %>% 
+  left_join(df_kat_k1) %>% 
+  ## some sample located in Em, Sm but total mutations is less (<20), then its kataegis is dissappeared
+  mutate(Kategis_group = if_else(is.na(Kategis_group) & Chr == 'chr14', 'IGH', Kategis_group),
+         Target = if_else(is.na(Target) & Chr == 'chr14', 'Em,Sm', Target))  %>% 
+  #bind apobec apobec
+  bind_rows(df_shower_apobec %>% select(Sample, Chr,Pos_start, Pos_end,mutation_number , kataegis_id) %>% 
+              mutate(Kategis_group = 'APOBEC') %>% left_join(df_apobec %>% select(kataegis_id, Target = Gene))) 
+ 
+df_shower_annot = df_shower_annot %>% left_join(df_nonIg %>% select(kataegis_id, Dist) %>% duplicate())   %>% 
+  disntic()
+
+write_tsv(df_shower_annot, 'Annotation/kataegis_annot.xls', na = '.')  
+
+# seperate kataegis' annotatoion
+df_shower_split_annot = 
+  #ig_annot 
+  kat_ig %>% select(kataegis_id, Pos_start , Pos_end , Gene = Igrange, K1_contribution, mutation_number, N_mut_K1, N_mut_K2)  %>% 
+  mutate(Group = if_else(grep('chr14', kataegis_id ),'IGH', if_else(grepl('chr2', kataegis_id), 'IGK', 'IGL'))) %>% 
+  #non-ig annot
+  bind_rows(df_nonIg %>% select(kataegis_id, Pos_start = pos_start, Pos_end = pos_end , Gene, K1_contribution, mutation_number = number_mutations, N_mut_K1, N_mut_K2) )%>% 
+  #bind apobec apobec
+  bind_rows(df_shower_apobec %>% select(kataegis_id,Pos_start, Pos_end,mutation_number ) %>%  mutate(Gene = 'APOBEC') )
+  # Ig region 9
+  
+
+write_tsv(df_shower_split_annot, 'Annotation/kataegis_annot_split.xls')  
+
+
+
+
+```
+
+
+ for UCSC
+```{r}
+# write for UCSC zooming
+df_mut_forUCSC = df_mut_cplt %>% 
+  #filter(Sample %in% df_ig_vj_mut$Sample) %>%  # forget which is the df_ig_vj_mut data
+  select(Chr = chrom, start = pos_start, end = pos_start,  start2 = pos_start, end2 = pos_start)  %>% 
+  mutate(chr = str_c('chr', Chr), Igregion = 'V_J', X1 = 0, X2 = '-', Color = '255,74,74') %>% 
+  select(chr, start, end , Igregion, X1, X2, start2, end2, Color) %>% 
+  add_row(chr = c('browser position chr14:106053274-107288051',
+                  'browser hide all;', 
+                  'track name="IGH kataegis region" description="IGH regions - CSR" visibility=2 itemRgb="On"'),
+          .before = 1  )
+write_tsv(df_mut_forUCSC, paste0( 'IGH.zooming.V_J.tsv'), col_names = F) #need delete the space and " on the first three rows
+
+
+```
+
+
+
+## Plots
+
+### K1/K2/APOBEC each mutation of TSS
+```{r}
+# nontIg
+tss_nonIg =  df_annot_nonIg %>% bind_rows(df_annot_apobec) %>% 
+    mutate(Gene = str_remove_all(Gene, ',?NONE\\(dist=NONE\\),?')) %>% 
+  separate(Gene , c('Gene1', 'Gene2'), sep = ',') %>% 
+  # calculate diss #
+  mutate(Dist1 = if_else(grepl('dist=', Gene1),  str_remove(str_extract(Gene1, 'dist=\\d+'), 'dist='), '0'),
+         Dist2 = if_else(grepl('dist=', Gene2),  str_remove(str_extract(Gene2, 'dist=\\d+'), 'dist='), '0'),
+         Dist1 = as.numeric(Dist1), Dist2 = as.numeric(Dist2)) %>% 
+  # gene name #
+  mutate(Gene1 = str_remove_all(Gene1, '\\(.*'),
+         Gene2 = str_remove_all(Gene2, '\\(.*'),
+         Gene2 = str_remove_all(Gene2, '^NM_.*')) %>% 
+  ## unique kataegis ##
+  rowwise() %>% 
+  mutate(Gene = if_else(is.na(Gene2) | Gene2 == 'NONE', Gene1, if_else(Dist1 <= Dist2, Gene1, Gene2)),
+         Dist = min(Dist1, Dist2, na.rm = T)) %>% 
+  # calculate TSS
+  left_join(ref_gene_tss) %>% 
+  mutate(Dist_TSS = abs(Start - TSS)) %>% 
+  group_by(kataegis_id, Chr, Start, End,Ref,Alt) %>% 
+  summarise(Dist_TSS = min(Dist_TSS, na.rm =  T)) %>% 
+  filter(!is.infinite(Dist_TSS)) %>% 
+  left_join(df_mut_k1 %>% select(kataegis_id, Chr = chrom, Start = position, End = position,Ref = ref,Alt = alt, K1_contribution, kataegis_source))
+  
+
+# Ig
+tss_Ig = df_mut_k1 %>% filter(kataegis_id %in% kat_ig$kataegis_id) %>% rowwise() %>% 
+  mutate(Gene = ig_annot(chrom, position, position))   %>% 
+  select(kataegis_id, Chr = chrom, Start = position, End = position,Ref = ref,Alt = alt, K1_contribution, kataegis_source) %>% 
+  left_join(Ig_gene_tss) %>% 
+  mutate(Dist_TSS = abs(Start - TSS)) %>% 
+  group_by(kataegis_id, Chr, Start, End,Ref,Alt, K1_contribution, kataegis_source) %>% 
+  summarise(Dist_TSS = min(Dist_TSS, na.rm =  T)) %>% 
+  filter(!is.infinite(Dist_TSS)) 
+
+
+tss_all = bind_rows(tss_Ig, tss_nonIg) %>% 
+  mutate(kataegis_source = if_else(is.na(kataegis_source) , 'APOBEC', kataegis_source) ,
+         log_Dist_TSS = log10(Dist_TSS))
+
+write_tsv(tss_all, 'Annotation/TSS_distance.tsv')
+
+# tt2 = df_shower_annot %>% left_join(tss_all %>% select(kataegis_id, Dist_TSS) %>% group_by(kataegis_id) %>% summarise(Dist_TSS = min(Dist_TSS)))
+
+pd <- ggplot(tss_all %>% filter(kataegis_source != "NA") %>% 
+         mutate(kataegis_source = factor(kataegis_source, levels =  c('K1', 'APOBEC',  'K2')))) +
+  geom_density( aes(x = Dist_TSS, color = kataegis_source), alpha = 0 , adjust =  3 )  + 
+   scale_x_log10(n.breaks = 6) + 
+  geom_vline(xintercept = 2000, linetype=2) + 
+  xlab('Distance to TSS') +
+ # ylim(c(0,1)) + 
+  theme_bw() + theme(panel.grid = element_blank())
+
+eoffice::topptx(pd,filename = plot_file, w = 5, h = 3 ,append = T )
+
+
+getwd()
+
+```
+
+
+
+```{r write for ciscos plot}
+
+
+our_dl = df_kat_k1 %>% left_join(df_shower_annot) %>% left_join(phe %>% select(Sample, Disease, Source)) %>% 
+  filter(Source == 'Our' )  %>% 
+  select(Sample, Chr, Pos_start, Pos_end, K1_contribution, Disease)
+
+write_tsv(our_dl, 'KataegisRegion.K1contribution.OurPairedWGS.forCircos.tsv')
+getwd()
+```
+
+
+
+## seperate the peaks of K2
+```{r}
+df_shower_annot = read_tsv('Results/rm_apobec_kataegis/Annotation/kataegis_annot2.xls')
+
+df_mut_cplt = read_tsv('../../2_Kataegis/kataegis_sep.wgs.subtype.txt') %>% 
+   mutate(SampleID = str_remove_all(Sample, '\\|.*')) %>% 
+  filter(SampleID %in% phe$Sample) %>% select(-SampleID)
+tss_all = read_tsv('Annotation/TSS_distance.tsv')
+
+kat.k2 = df_shower_annot %>% filter(Kategis_group %in% c('AID_offtarget', 'other_nonIg')) %>% filter(K1_contribution < 0.33) %>% 
+  mutate( K2_group = if_else(Dist > 10000, 'distal', 'proximal'), Dist = as.numeric(Dist) +1)
+
+
+mut.k2 = df_mut_cplt %>%  
+  # right_join(kat.k2 %>% select(Sample = kataegis_id, K2_group)) %>%  # seperated by kataegis distance
+  left_join(tss_all %>% select(Sample = kataegis_id, chrom = Chr, pos_start = Start, pos_end = End, ref = Ref, alt = Alt, Dist_TSS, K1_contribution, kataegis_source)) %>% 
+  filter(kataegis_source == 'K2') %>% mutate( K2_group = if_else(Dist_TSS > 10000, 'distal', 'proximal'))  %>% # sperated by mutations distance
+  identity() 
+
+# density plot
+ggplot(mut.k2  ) +
+  geom_density( aes(x = Dist_TSS, color = K2_group), alpha = 0 , adjust =  3 )  + 
+   scale_x_log10(n.breaks = 6) + 
+  geom_vline(xintercept = 10000, linetype=2) + 
+  xlab('Distance to TSS') +
+ # ylim(c(0,1)) + 
+  theme_bw() + theme(panel.grid = element_blank())
+
+
+# mutation pattern
+SigK2 = mut.k2 %>% group_by(K2_group, MutationType) %>% summarise(N = n()) %>% spread(K2_group, N) %>%   dplyr::rename(MutationsType = MutationType)
+
+plot_sbs(SigK2, ncol = 1)
+
+```
+
+
+```{r directly seperate T>C and T>G bar}
+
+mut.k2.pure = mut.k2 %>% mutate(mut_type = if_else(type == 'T-C', 'T>C', if_else(type == 'T-G', 'T>G', '') )) %>% filter(mut_type != '')
+
+
+# density plot
+ggplot(mut.k2.pure  ) +
+  geom_density( aes(x = Dist_TSS, color = mut_type), alpha = 0 , adjust =  3 )  + 
+   scale_x_log10(n.breaks = 6) + 
+  geom_vline(xintercept = 10000, linetype=2) + 
+  xlab('Distance to TSS') +
+ # ylim(c(0,1)) + 
+  theme_bw() + theme(panel.grid = element_blank())
+
+# mutation pattern
+SigK2.pure = mut.k2.pure %>% group_by(mut_type, MutationType) %>% summarise(N = n()) %>% spread(mut_type, N) %>%   dplyr::rename(MutationsType = MutationType)
+
+plot_sbs(SigK2.pure, ncol = 1)
+
+```
+

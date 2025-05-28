@@ -1,0 +1,682 @@
+---
+title: "DNA repaire pathway analysis"
+author: "hui.wan"
+date: "1/4/2023"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, tidy=TRUE, cache=TRUE)
+
+ knitr::opts_knit$set(root.dir = '~/OneDrive - Karolinska Institutet/Documents/Project/Kataegis_2023/')
+
+```
+
+# Introduction
+
+This is an R Markdown document to compare signature and kataegis distribution B cell tumors' kataegis.
+After calling signature, kategis and kataegis' signatures, we annoted the kataegis' region.
+
+Here, we need to compare the different DNA repair pathway among different signatures and clinic features.
+
+```{r load packages}
+library(tidyverse)
+library(cowplot)
+library(ggpubr)
+library(eoffice)
+library(coop)
+library(rstatix)
+library(RColorBrewer)
+library(ggsci)
+library(splitstackshape)
+library(ComplexHeatmap)
+library(paletteer)
+```
+
+
+
+```{r}
+mydir = 'Results/Group_comparsion/'
+dir.create(mydir)
+
+df_sum = read_tsv('0.data//Sample_information.xls') %>% 
+  mutate(DINUC = if_else(is.na(DINUC), 0, DINUC),
+         INDEL = if_else(is.na(INDEL), 0, INDEL),
+         Total_mutations = SBS + DINUC + INDEL,
+         N_kataegis = if_else(is.na(N_kataegis), 0 , N_kataegis))
+
+plot_file = 'plot.20230113.pptx'
+
+order_disease = c('CLL', 'MCL','BL', 'FL', 'DLBCL', 'MM', 'un-BNHL' )
+order_subtype = c('U-CLL', 'M-CLL', 'cMCL', 'nnMCL', 'BL', 'FL', 'GCB-DLBCL', 'ABC-DLBCL', 'MM','U-DLBCL', 'un-DLBCL', 'un-BNHL')
+select_subtype = c('U-CLL', 'M-CLL',  'cMCL', 'nnMCL', 'BL', 'FL',  'GCB-DLBCL' , 'ABC-DLBCL' , 'MM' )
+
+col_disease = structure( brewer.pal(12, 'Paired')[c(2,4,7, 8, 6, 10, 12 )], names = order_disease)
+col_subtype = structure( brewer.pal(12, 'Paired')[c(1:4, 7:8, 5:6, 10, 11,9,12)], names = order_subtype)
+col_select_subtype = structure( brewer.pal(12, 'Paired')[c(1:4,7:8, 5:6, 10 )],names = select_subtype)
+col_source = structure(pal_jco()(length(unique(phe$Source))), names = unique(phe$Source))
+
+# order by GC stage
+order_subtype = c('U-CLL',  'cMCL', 'BL', 'FL', 'GCB-DLBCL', 'ABC-DLBCL', 'U-DLBCL', 'un-DLBCL', 'M-CLL', 'nnMCL', 'MM', 'un-BNHL')
+select_subtype = c('U-CLL',  'cMCL', 'BL', 'FL',  'GCB-DLBCL' , 'ABC-DLBCL' ,'M-CLL', 'nnMCL',  'MM' )
+col_subtye= structure( c(brewer.pal(3, 'Set1')[c(3,3, 2,2,2,2,2,2, 1,1,1)], 'grey'), names = order_subtype)
+col_select_subtype = structure( brewer.pal(3, 'Set1')[c(3,3, 2,2,2,2, 1,1,1)], names = select_subtype)
+
+order_region5 = c("IGH", "IGL","IGK", "Non-Ig <=2kb", "Non-Ig >2kb" )
+cols_k1 <- c(colorRampPalette(c("blue", "blue"))(33),
+          colorRampPalette(c("blue", 'black',  "red"))(34), 
+          colorRampPalette(c("red", "red"))(33))
+
+col_mut_stat = structure(c('grey', 'white'), names = c('Mutated', 'Unmutated'))
+my_subytpe = c('BL', 'ABC-DLBCL',  'GCB-DLBCL',  'FL', 'M-CLL', 'nnMCL', 'cMCL', 'N-CLL')
+order_ddr = c('BER', 'NER', 'MMR', 'HR', 'NHEJ', "FA" , "DDR" ,  "DNA replication" ,  "Cell_Cycle_Checkpoint"      )
+phe = df_sum %>%  mutate(Subtype = factor(Subtype, level = order_subtype))
+```
+
+
+
+```{r barannot}
+df_smp_annt = df_sum %>% 
+  select(Sample, Age, Gender, Disease, Subtype, BER, MMR, NER, HR, NHEJ, DDR,FA, `DNA replication`, Cell_Cycle_Checkpoint,  HBSAg, N_mutation_IGHV) %>% 
+  mutate(Age = if_else(Age >60, '>60 y', if_else(Age <= 60, '<=60 y', 'NA') ),
+         BER = if_else(!is.na(BER), 'BER mutated','BER unmutated'),
+         MMR = if_else(!is.na(MMR), 'MMR mutated','MMR unmutated'),
+         HR = if_else(!is.na(HR), 'HR mutated','HR unmutated'),
+         NER = if_else(!is.na(NER), 'NER mutated','NER unmutated'),
+         NHEJ = if_else(!is.na(NHEJ), 'NHEJ mutated','NHEJ unmutated'),
+         FA = if_else(!is.na(FA), 'FA mutated','FA unmutated'),
+         DDR = if_else(!is.na(DDR), 'DDR mutated','DDR unmutated'),
+         `DNA replication` = if_else(!is.na(`DNA replication`), 'DNA replication mutated','DNA replication unmutated'),
+         Cell_Cycle_Checkpoint = if_else(!is.na(Cell_Cycle_Checkpoint), 'Cell_Cycle_Checkpoint mutated','Cell_Cycle_Checkpoint unmutated')
+
+         ) %>% 
+  gather(content, value, -Sample) %>% mutate(yvalue = 1) %>% 
+  left_join(phe %>% select(Sample, Subtype))
+
+plot_barAnnot <- function(mycontent, color) {
+  ggbarplot(df_smp_annt %>% filter(content == mycontent), palette = color, 
+                x = 'Sample', y= 'yvalue', fill = 'value',  color = NA, order = order_sample$Sample, 
+                # facet.by = 'Subtype', nrow = 1, 
+            legend = 'top') + 
+  labs(fill = mycontent) + ylim(0,1) +
+  rremove('legend') +
+  theme(axis.text.x =  element_blank(), axis.text.y =  element_blank(), axis.line =  element_blank(), axis.title = element_blank(), axis.ticks = element_blank()) 
+
+}
+
+
+gb5 <- plot_barAnnot('BER', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('BER mutated','BER unmutated' )) )
+gb6 <- plot_barAnnot('MMR', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('MMR mutated','MMR unmutated' )) )
+gb7 <- plot_barAnnot('NER', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('NER mutated','NER unmutated' )) )
+gb8 <- plot_barAnnot('HR', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('HR mutated','HR unmutated' )) )
+gb9 <- plot_barAnnot('NHEJ', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('NHEJ mutated','NHEJ unmutated' )) )
+
+```
+
+
+## DDR genes
+```{r }
+df_ddr_genes = df_sum %>% select(Sample,one_of(order_ddr)) %>% 
+  gather(DDR, mutations, -Sample, ) %>% 
+  filter(!is.na(mutations)) %>% 
+   cSplit('mutations', sep = ';', direction = 'long') %>% 
+  mutate(Gene = str_remove_all(mutations, ':.*$'))  %>% 
+  select(-mutations) %>% distinct() %>% 
+  mutate(DDR_mutator = str_c(DDR, Gene, sep = '_')) 
+
+ph_ddr_gene.bysample  = df_ddr_genes %>% select(DDR_mutator, Sample ) %>% 
+  mutate(value = 1) %>% 
+  spread(Sample, value, fill = 0)
+
+ph_ddr_gene.bysubtype  = df_ddr_genes %>% select(DDR_mutator, Sample ) %>% 
+  left_join(phe %>% select(Sample, Subtype)) %>% 
+  filter(Subtype %in% select_subtype) %>% 
+  group_by(DDR_mutator, Subtype) %>% 
+  summarise(N_mutated_sample = n_distinct(Sample)) %>% 
+  left_join(phe %>% filter(Subtype %in% select_subtype) %>% group_by(Subtype) %>% summarise(N_total_sample = n_distinct(Sample))) %>% 
+  mutate(pct = round(N_mutated_sample/N_total_sample * 100, 0)) %>% 
+  select(Subtype, DDR_mutator, pct) %>% 
+  spread(Subtype, pct)
+
+
+gene_in_subtype = df_ddr_genes %>% left_join(phe %>% select(Sample, Subtype)) %>% 
+  group_by(DDR_mutator) %>% summarise(N_subtype = n_distinct(Subtype)) %>% 
+  filter(DDR_mutator %in% ph_ddr_gene.bysubtype$DDR_mutator) %>% 
+  mutate(DDR = str_remove(DDR_mutator, '_.*'),
+         Gene = str_remove(DDR_mutator, '.*_')) %>% 
+  arrange(factor(DDR, levels = order_ddr), -N_subtype)
+
+ph_ddr_gene.bysubtype = ph_ddr_gene.bysubtype %>% arrange(factor(DDR_mutator, levels =  gene_in_subtype$DDR_mutator))
+
+mat = ph_ddr_gene.bysubtype %>% column_to_rownames('DDR_mutator') %>% as.matrix()
+library(ComplexHeatmap)
+col1 = circlize::colorRamp2(seq(1, max(mat, na.rm = T), length = 3), c("blue", "#EEEEEE", "red"))
+
+ht <- ComplexHeatmap::Heatmap(mat, col = col1,
+                        name =  'Mut_Freq (%)',
+                        cluster_rows = F, cluster_columns = F, 
+                        rect_gp = gpar(col = "white"), border_gp = gpar(col = "black"),
+                        row_split  = factor(str_remove(ph_ddr_gene.bysubtype$DDR_mutator, '_.*'), levels = order_ddr),
+                        row_labels = gene_in_subtype$Gene,
+                        right_annotation =  rowAnnotation(N_subtype = anno_barplot(gene_in_subtype$N_subtype))
+                        )
+
+
+pdf('./Results/Group_comparsion/heatmap.DDRgene.pdf', h = 16, w = 6)
+draw(ht)
+dev.off()
+
+```
+
+
+## DDR pathways
+```{r DDR percentage}
+
+
+df.ddr = df_sum %>% mutate(  BER = if_else(is.na(BER), 'Unmutated', 'Mutated'), 
+                             MMR = if_else(is.na(MMR), 'Unmutated', 'Mutated'), 
+                             NER = if_else(is.na(NER), 'Unmutated', 'Mutated'), 
+                            NHEJ = if_else(is.na(NHEJ), 'Unmutated', 'Mutated'), 
+                            HR = if_else(is.na(HR), 'Unmutated', 'Mutated'),
+                            FA = if_else(is.na(FA), 'Unmutated', 'Mutated'),
+                             DDR = if_else(is.na(DDR), 'Unmutated', 'Mutated'),
+                             `DNA replication` = if_else(is.na(`DNA replication`), 'Unmutated', 'Mutated'),
+                             Cell_Cycle_Checkpoint = if_else(is.na(Cell_Cycle_Checkpoint), 'Unmutated', 'Mutated')
+) 
+
+
+ddr_pct = df.ddr %>% filter(Subtype %in% select_subtype) %>% select(one_of(order_ddr), Subtype, Sample) %>% 
+  gather(DDR, mutated, -Subtype, -Sample) %>% 
+  group_by(Subtype, DDR, mutated ) %>%  
+  summarise(n = n_distinct(Sample)) %>% 
+  spread(mutated, n, fill = 0) %>% 
+  mutate(mut_freq = Mutated/(Mutated +Unmutated ) * 100)
+
+mybar <- function(ddr) {
+  ggbarplot( ddr_pct %>% filter(DDR == ddr), x = 'Subtype', y = 'mut_freq', fill = 'Subtype', palette = col_select_subtype, 
+           #facet.by = 'DDR',   scale = 'free',  
+           ylab = paste(ddr, " Mut_Freq %"),
+          sort.val = "desc", sort.by.groups = F) + rremove('legend') + rremove('xlab')
+
+}
+
+
+# plot splitted by DDR
+pb.ddr <-  map(order_ddr, mybar)
+eoffice::topptx(plot_grid(plotlist = pb.ddr, ncol = 2, byrow = F, align = c('v','h')) , filename = plot_file, w = 6, h = 6 ,append = T, title = 'DDR vs subtype' )
+
+# plot splitted by Subtype
+ggbarplot(ddr_pct %>% mutate(Subtype =  factor(Subtype, levels = select_subtype)),
+          x =  'DDR', y = 'mut_freq' , fill ='DDR',  position = position_dodge(),
+          facet.by =  'Subtype', scale = 'free', ncol = 2, order = order_ddr) +
+  rremove('legend') + rremove('xlab')
+eoffice::topptx(last_plot() , filename = plot_file, w = 6, h = 8 ,append = T, title = 'DDR vs subtype' )
+
+```
+
+
+## correlation
+
+```{r cor with mutation load }
+box_ddr <- function(mydf, yshow){
+  # xshow = 'MMR'
+  # yshow = 'Total_mutations'
+  # mydf = df.ddr.long
+  
+  ymax = mydf %>% pull(yshow)  %>%  quantile(., 0.99, na.rm = T)
+  ggboxplot(mydf %>% filter(!is.na(yshow)), x = 'DDR', y = yshow, 
+            fill = 'Mut_status', palette = col_mut_stat,
+            legend = 'right',
+            outlier.shape = NA) +
+    stat_compare_means(aes(group = Mut_status),  method = 'wilcox', label = 'p.signif', label.y = ymax) +
+    coord_cartesian(ylim = c(0,ymax)) + rremove('xlab')
+
+}
+
+df.ddr.long =  df.ddr %>% select(Sample, one_of(order_ddr)) %>% gather(DDR, Mut_status, -Sample) %>% 
+    left_join(df.ddr %>% select(-one_of(order_ddr)))
+
+
+pb_mutN_1 = box_ddr(df.ddr.long,  yshow = 'Total_mutations')
+pb_mutN_2 = box_ddr(df.ddr.long,  yshow = 'SBS')
+pb_mutN_3 = box_ddr(df.ddr.long,  yshow = 'DINUC')
+pb_mutN_4 = box_ddr(df.ddr.long,  yshow = 'INDEL')
+
+
+pb_mutN_4 = box_ddr(df.ddr.long,  yshow = 'N_kataegis')
+pb_mutN_4 = box_ddr(df.ddr.long,  yshow = 'N_mutation_IGHV')
+
+pb_mutN_5 = box_ddr(df.ddr.long,  yshow = 'Age')
+
+eoffice::topptx(pb_mutN_1, filename = plot_file, w = 6, h = 2 ,append = T, title = 'DDR pathway' )
+eoffice::topptx(plot_grid(pb_mutN_2, pb_mutN_3, pb_mutN_4, ncol = 1), filename = plot_file, w = 6, h = 6 ,append = T, title = 'DDR pathway' )
+
+eoffice::topptx(box_ddr(df.ddr.long,  yshow = 'Age'), filename = plot_file, w = 6, h = 2 ,append = T, title = 'DDR pathway & Age' )
+
+eoffice::topptx(box_ddr(df.ddr.long,  yshow = 'N_kataegis'), filename = plot_file, w = 6, h = 2 ,append = T, title = 'DDR pathway & N_kataegis' )
+
+eoffice::topptx(box_ddr(df.ddr.long,  yshow = 'N_mutation_IGHV'), filename = plot_file, w = 6, h = 2 ,append = T, title = 'DDR pathway & N_mutation_IGHV' )
+```
+
+
+
+```{r cor with mutation load per Subtype}
+box_ddr_bySubtype <- function(mydf, yshow){
+  # xshow = 'MMR'
+  # yshow = 'Total_mutations'
+  
+  #ymax = mydf %>% pull(yshow)  %>%  quantile(., 0.99, na.rm = T)
+  ggboxplot(mydf %>% filter(!is.na(yshow)), x = 'DDR', y = yshow, 
+            fill = 'Mut_status', palette = col_mut_stat,
+            facet.by = 'Subtype', ncol = 2, by.row = F , scale = 'free_y', 
+            legend = 'right',
+            outlier.shape = NA) +
+    stat_compare_means(aes(group = Mut_status),  method = 'wilcox', label = 'p.signif', hide.ns = T) +
+    #coord_cartesian(ylim = c(0,ymax)) + 
+    rremove('xlab') + rremove('legend')
+
+}
+
+df.ddr.long =  df.ddr %>%  filter(Subtype %in% select_subtype) %>% 
+  select(Sample, one_of(order_ddr)) %>% gather(DDR, Mut_status, -Sample) %>% 
+    left_join(df.ddr %>% select(-one_of(order_ddr))) %>% 
+  mutate(Subtype = factor(Subtype, levels = select_subtype))
+
+
+pb_mutN_1 = box_ddr_bySubtype(df.ddr.long,  yshow = 'Total_mutations')
+pb_mutN_2 = box_ddr_bySubtype(df.ddr.long,  yshow = 'SBS')
+pb_mutN_3 = box_ddr_bySubtype(df.ddr.long,  yshow = 'DINUC')
+pb_mutN_4 = box_ddr_bySubtype(df.ddr.long,  yshow = 'INDEL')
+
+
+# pb_mutN_4 = box_ddr_bySubtype(df.ddr.long,  yshow = 'N_kataegis')
+# pb_mutN_4 = box_ddr_bySubtype(df.ddr.long,  yshow = 'N_mutation_IGHV')
+
+# pb_mutN_5 = box_ddr_bySubtype(df.ddr.long,  yshow = 'Age')
+
+eoffice::topptx(pb_mutN_1, filename = plot_file, w = 8, h = 6 ,append = T, title = 'DDR pathway & Total mutations' )
+eoffice::topptx(plot_grid(pb_mutN_2, pb_mutN_3, pb_mutN_4, ncol = 1), filename = plot_file, w = 12, h = 6 ,append = T, title = 'DDR pathway' )
+
+eoffice::topptx(box_ddr_bySubtype(df.ddr.long,  yshow = 'N_nonsilent_mutations'), filename = plot_file,   w = 8, h = 6, append = T, title = 'DDR pathway & N_nonsilent_mutations' )
+
+eoffice::topptx(box_ddr_bySubtype(df.ddr.long,  yshow = 'Age'), filename = plot_file,  w = 8, h = 6,append = T, title = 'DDR pathway & Age' )
+
+eoffice::topptx(box_ddr_bySubtype(df.ddr.long,  yshow = 'N_kataegis'), filename = plot_file,   w = 8, h = 6,append = T, title = 'DDR pathway & N_kataegis' )
+
+eoffice::topptx(box_ddr_bySubtype(df.ddr.long,  yshow = 'N_mutation_IGHV'), filename = plot_file,   w = 8, h = 6 ,append = T, title = 'DDR pathway & N_mutation_IGHV' )
+```
+
+
+```{r fisher test NOT USE for Age}
+fisher_compare <- function(mydf, xshow, color){
+  # xshow = 'MMR'
+  # color = 'Age'
+  #mydf = df_mmr %>% filter(!is.na(Age)) %>% mutate(Age = if_else(Age > 60 , '>60y', '<=60y')) %>% summarise(N_sample = length(unique(Sample))) 
+  p = fisher.test(mydf %>% spread(get(xshow), N_sample)  %>% column_to_rownames(color) %>% as.matrix())$p.value
+  ggbarplot(mydf,
+            x = xshow, y = 'N_sample', fill = color, palette = c('black', 'grey'),position = position_dodge(0.8)) +
+    geom_text(aes(x = 1.5, y = Inf , label = paste0( 'p = ', round(p, 4))),hjust = 0, vjust = 1) + 
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+    theme(panel.background = element_blank(), legend.position = 'right') +
+    theme_bw() + theme(panel.grid = element_blank(), legend.title = element_blank())
+
+  
+}
+
+#MMR
+df.mmr = df_sum %>% filter(!is.na(Age) & Age != 0) %>% 
+  mutate(Age = if_else(Age > 60 , '>60y', '<=60y'), MMR = if_else(is.na(MMR), 'Unmutated', 'Mutated')) %>% 
+  group_by(Age, MMR) %>% summarise(N_sample = length(unique(Sample))) 
+p.mmr <- fisher_compare(df.mmr, "MMR", "Age")
+
+# BER
+df.BER = df_sum %>% filter(!is.na(Age)) %>% 
+  mutate(Age = if_else(Age > 60 , '>60y', '<=60y'), BER = if_else(is.na(BER), 'Unmutated', 'Mutated')) %>% 
+  group_by(Age, BER) %>% summarise(N_sample = length(unique(Sample))) 
+p.BER <- fisher_compare(df.BER, "BER", "Age")
+
+# HR
+df.HR = df_sum %>% filter(!is.na(Age)) %>% 
+  mutate(Age = if_else(Age > 60 , '>60y', '<=60y'), HR = if_else(is.na(HR), 'Unmutated', 'Mutated')) %>% 
+  group_by(Age, HR) %>% summarise(N_sample = length(unique(Sample))) 
+p.HR <- fisher_compare(df.HR, "HR", "Age")
+
+# NHEJ
+df.NHEJ = df_sum %>% filter(!is.na(Age)) %>% 
+  mutate(Age = if_else(Age > 60 , '>60y', '<=60y'), NHEJ = if_else(is.na(NHEJ), 'Unmutated', 'Mutated')) %>% 
+  group_by(Age, NHEJ) %>% summarise(N_sample = length(unique(Sample))) 
+p.NHEJ <- fisher_compare(df.NHEJ, "NHEJ", "Age")
+
+
+# NER
+df.NER = df_sum %>% filter(!is.na(Age)) %>% 
+  mutate(Age = if_else(Age > 60 , '>60y', '<=60y'), NER = if_else(is.na(NER), 'Unmutated', 'Mutated')) %>% 
+  group_by(Age, NER) %>% summarise(N_sample = length(unique(Sample))) 
+p.NER <- fisher_compare(df.NER, "NER", "Age")
+
+
+p <- plot_grid(p.mmr + rremove('legend'), p.BER+ rremove('legend'), p.NER + rremove('legend'), p.HR+ rremove('legend'), p.NHEJ+ rremove('legend'), nrow = 2) 
+eoffice::topptx(p, filename = plot_file, w = 8, h = 5 ,append = T, title = 'Age vs DNA repair' )
+
+```
+
+
+```{r DDR  realted to signatures}
+
+#  DDR & signatures
+wilcox_plot <- function(mydf, xshow, yshow){
+  # xshow = 'MMR'
+  # yshow = 'DBS78B'
+
+  ymax = mydf %>% pull(yshow)  %>%  quantile(., 0.98, na.rm = T)
+  ggboxplot(mydf %>% filter(!is.na(yshow)), x = xshow, y = yshow, 
+            fill = xshow, palette = col_mut_stat, order = c('Mutated', 'Unmutated'),
+            legend = 'right',
+            outlier.shape = NA) +
+   # stat_compare_means(method = 'wilcox', label = 'p.signif', label.y = ymax)  +
+      stat_compare_means(method = 'wilcox', label = 'p', label.y = ymax, label.x.npc = 'middle')  +
+    #stat_compare_means(aes(group = Mut_status),  method = 'wilcox', label = 'p.signif', label.y = ymax) +
+    coord_cartesian(ylim = c(0,ymax)) + rremove('xlab') + 
+    theme_bw() + theme(panel.grid = element_blank(), legend.title = element_blank()) +
+    rremove('legend') 
+}
+
+# MMR 
+bp.mmr.1 <- wilcox_plot(df.ddr,xshow = 'MMR',  yshow = 'SBS96B') 
+bp.mmr.2 <- wilcox_plot(df.ddr ,xshow = 'MMR',  yshow = 'DBS78B') 
+
+# our.mmr = read_tsv('1_Signature/Our/Signatures/ID83/Suggested_Solution/ID83_De-Novo_Solution/Activities/ID83_De-Novo_Activities_refit.txt') %>% 
+#   left_join(df.ddr %>% select(Sample, MMR, NHEJ), by = c('Samples' = 'Sample') )
+
+bp.mmr.3 <- wilcox_plot(df.ddr %>% filter(!is.na(MMR)), xshow = 'MMR',  yshow = 'ID83A') 
+bp.mmr.4 <- wilcox_plot(df.ddr %>% filter(!is.na(MMR)), xshow = 'MMR',  yshow = 'ID83B') 
+
+
+eoffice::topptx(plot_grid(bp.mmr.1, bp.mmr.2, bp.mmr.3, bp.mmr.4, nrow = 1), filename = plot_file, w = 10, h = 2 ,append = T, title = 'Signature vs MMR deficiency ' )
+
+
+#  Other DDR
+sig.ddr <- str_c('SBS96', c( 'H', 'L','D', 'G' ))  # B: MMR; H & L: BER; K: HR; G: HR/NER
+
+## NHEJ
+bp.nhej <- wilcox_plot(df.ddr %>% filter(!is.na(NHEJ)) ,xshow = 'NHEJ',  yshow = 'ID83C') 
+eoffice::topptx(plot_grid(bp.nhej,  nrow = 1), filename = plot_file, w = 2.5, h = 2 ,append = T, title = 'Signature vs DNA' )
+
+# HR
+bp.hr1 <- wilcox_plot(df.ddr,xshow = 'HR',  yshow = 'SBS96K')  + coord_cartesian(ylim = c(0,1400))
+bp.hr2 <- wilcox_plot(df.ddr,xshow = 'HR',  yshow = 'SBS96G')  + coord_cartesian(ylim = c(0,2000))
+eoffice::topptx(plot_grid( bp.hr1 , bp.hr2 ,  nrow = 1), filename = plot_file, w = 5, h = 2 ,append = T, title = 'Signature vs DNA' )
+
+# BER
+bp.ber1 <- wilcox_plot(df.ddr,xshow = 'BER',  yshow = 'SBS96H') 
+bp.ber2 <- wilcox_plot(df.ddr,xshow = 'BER',  yshow = 'SBS96L') + coord_cartesian(ylim = c(0,2000))
+
+eoffice::topptx(plot_grid( bp.ber1 , bp.ber2 ,  nrow = 1), filename = plot_file, w = 5, h = 2 ,append = T, title = 'Signature vs DNA' )
+
+## NER
+bp.ner <- wilcox_plot(df.ddr,xshow = 'NER',  yshow = 'SBS96G')
+eoffice::topptx(plot_grid(bp.ner,  nrow = 1), filename = plot_file, w = 2.5, h = 2 ,append = T, title = 'Signature vs DNA' )
+
+eoffice::topptx(plot_grid( bp.mmr.3, bp.mmr.4,bp.nhej,  nrow = 3), filename = plot_file, w = 2, h = 6 ,append = T, title = 'ID vs DNA' )
+
+```
+
+
+### Signatures
+```{r correlation}
+df_sum.dbl = df_sum %>% select(Sample,  Age, N_mutation_IGHV,  Total_mutations,  starts_with('DBS78'), starts_with('ID'), starts_with('SBS96'), N_kataegis, Exposure_signature_K1,Exposure_signature_K2, K1_contribution , N_kataegis_APOBEC) 
+df_sum.dbl[is.na(df_sum.dbl)] = 0
+
+cutoff_mutN = quantile(df_sum.dbl$Total_mutations, 0.95)
+
+df_sum.dbl = df_sum.dbl %>% filter(Total_mutations <= cutoff_mutN) %>% left_join(phe %>% select(Sample, Subtype))
+
+df_cor = cor_mat(df_sum.dbl %>% column_to_rownames('Sample')) 
+
+
+# correlation heatmap
+corrplot::corrplot(df_cor %>% column_to_rownames('rowname') %>% as.matrix(), tl.col = 'black',
+                   type="upper", order="hclust",  col= rev(brewer.pal(n=8, name="RdYlBu")))
+
+ggsave(last_plot(), 'Results/Group_comparsion/corrplot.pdf', h = 8, h = 8)
+
+# correlation scatter
+plot_cor <- function( x,df,y){
+  ggscatter(df, x= x, y = y, add = "reg.line", add.params = list(color = "blue")) + 
+    stat_cor(method = "pearson", output.type = 'text') +
+     stat_cor(method = "spearman", output.type = 'text', cor.coef.name = 'rho')
+}
+
+plot_cor.color <- function(df, x,y){
+  
+  ggscatter(df, x= x, y = y, color = 'Subtype', palette = col_subtype, add = "reg.line", add.params = list(color = "blue")) + 
+    stat_cor(method = "pearson", output.type = 'text') +
+     stat_cor(method = "spearman",  output.type = 'text', cor.coef.name = 'rho', label.x.npc = 'middle') +
+    rremove('legend')
+}
+
+
+
+pc1.0 <- plot_cor(df = df_sum.dbl, y= 'N_mutation_IGHV', x = 'SBS96A')
+pc1.0 <- plot_cor.color(df = df_sum.dbl, y= 'N_mutation_IGHV', x = 'SBS96A')
+
+df_sbs = df_sum %>% select(Sample, starts_with('SBS96')) %>% gather(Signature, mutations, -Sample) %>% 
+  group_by(Sample) %>% mutate(pct = mutations/sum(mutations)) %>% select(-mutations) %>%  spread(Signature, pct)
+
+
+
+```
+
+## Lymphoid related signatures
+
+```{r}
+sig.lym <- c(str_c('SBS96', c('A', 'C')), 'DBS78A')
+sig.ddr <- str_c('SBS96', c('B', 'H', 'L','G' ))  # B: MMR; H:& L: BER; M: HR/NER ; M: APOBEC
+sig.unknow <- str_c('SBS96', c('D', 'I', 'N', 'E' ))
+sig.other<- str_c('SBS96', c('F', 'J', 'M', 'O' ))  # F: Age, J: SBS5; M: APOBEC; O: UV
+
+```
+
+
+```{r LymSig with IGHV_mut}
+# lymphoid signature with IGHV mutations
+#pc.lym.sig.ighv <-  map(c(sig.lym, 'Exposure_signature_K1'), ~ plot_cor(df = df_sum.dbl, y= 'N_mutation_IGHV', x = .))
+
+pc.lym.sig.ighv <-  map(c(sig.lym, 'Exposure_signature_K1'), ~ plot_cor.color(df = df_sum.dbl, y= 'N_mutation_IGHV', x = .))
+
+eoffice::topptx(plot_grid(plotlist = pc.lym.sig.ighv, nrow = 1) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'IGV vs SBS' )
+
+# unknow sig.
+pc.unk.sig.ighv <- map(sig.unknow, ~ plot_cor.color(df = df_sum.dbl, y= 'N_mutation_IGHV', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.unk.sig.ighv, nrow = 1) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'IGV vs SBS' )
+
+
+#  ddr
+pc.ddr.sig.ighv <- map(sig.ddr, ~ plot_cor.color(df = df_sum.dbl, y= 'N_mutation_IGHV', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.ddr.sig.ighv, nrow = 1) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'IGV vs SBS' )
+
+
+# others 
+
+pc.ddr.sig.ighv <- map(sig.other, ~ plot_cor.color(df = df_sum.dbl, y= 'N_mutation_IGHV', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.ddr.sig.ighv, nrow = 1) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'IGV vs SBS' )
+
+```
+
+
+```{r K1 & signatures NOT USE}
+pc.lym.sig.k1<-  map(sig.lym, ~ plot_cor(df = df_sum.dbl, y= 'Exposure_signature_K1', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.lym.sig.k1, nrow = 1) , filename = plot_file, w = 10, h = 3 ,append = T, title = 'Sig K1 vs SBS' )
+
+pc.unk.sig.k1<-  map(sig.unknow, ~ plot_cor(df = df_sum.dbl, y= 'Exposure_signature_K1', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.unk.sig.k1, ncol = 4) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'Sig K1 vs SBS unknown' )
+```
+
+
+```{r Sig with age NOT USE}
+pc2 <- plot_cor(df = df_sum.dbl %>% filter(!is.na(Age) & Age != 0), x= 'Age', y = 'SBS96F')
+#pc3 <- plot_cor(df =  df_sum %>% filter(!is.na(Age)), x= 'Age', y = 'SBS96F') + coord_cartesian(ylim=c(0,5000))
+
+eoffice::topptx(plot_grid(pc2 ,pc3, nrow = 1) , filename = plot_file, w = 7, h = 3 ,append = T, title = 'Age vs SBSB' )
+
+
+pc.ddr.sig.age<-  map(sig.ddr, ~ plot_cor(df = df_sum.dbl  %>% filter(!is.na(Age) & Age != 0), y= 'Age', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.ddr.sig.age, ncol = 4) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'Sig K1 vs SBS' )
+
+```
+
+
+##  PLOH siganture
+```{r correlation with poly sig}
+ref.polh = read_tsv('_Ref/2001_JMB_POLH.signatures.txt') %>% mutate(`2001_JMB_POLH` = `2001_JMB_POLH` *100)
+sig.sbs = read_tsv('Results/SBS_Signature/Signature/Signatures/SBS96_S16_Signatures.txt') %>% 
+  gather(Signatures, N_mut, -MutationType) %>%  group_by(Signatures) %>%  mutate(pct = N_mut/sum(N_mut) * 100) %>% 
+  select(-N_mut) %>% spread(Signatures, pct)
+
+sig.kat = read_tsv('Results/rm_apobec_kataegis/SBS96_2_Signatures/Signatures/SBS96_S2_Signatures.txt') %>% 
+  gather(Signatures, N_mut, -MutationType) %>%  group_by(Signatures) %>%  mutate(pct = N_mut/sum(N_mut) * 100) %>% 
+  select(-N_mut) %>% spread(Signatures, pct)
+names(sig.kat) = c('MutationType', 'Sig.K2', 'Sig.K1')
+
+plot_cor.sig <- function(df, x,y){
+  ggscatter(df %>% mutate(MutType6 = str_sub(MutationType, 3, 5)), 
+            x= x, y = y, color = 'MutType6',  palette = col.cosmic,
+            add = "reg.line",add.params = list(color = "blue")) + 
+     stat_cor(method = "pearson",  output.type = 'text', label.x.npc = 'middle') +
+    rremove('legend')
+}
+
+pc.lym.sig.polh <-  map(c("SBS96A", "SBS96C" ), ~ plot_cor.sig(df = sig.sbs %>% left_join(ref.polh), y= '2001_JMB_POLH', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.lym.sig.polh, nrow = 1) , filename = plot_file, w = 7, h = 3 ,append = T, title = 'POLH1 vs SBS' )
+
+#ps4 <- plot_cor.sig(sig.kat %>% left_join(ref.polh), x = 'Sig.K2', y = '2001_JMB_POLH')
+#eoffice::topptx(plot_grid(ps4, nrow = 1) , filename = plot_file, w = 4, h = 3 ,append = T, title = 'POLH vs K2' )
+
+pc.lym.k.polh <-  map(c('Sig.K1', 'Sig.K2'), ~ plot_cor.sig(df = sig.kat  %>% left_join(ref.polh), y= '2001_JMB_POLH', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.lym.k.polh, nrow = 1) , filename = plot_file, w = 7, h = 3 ,append = T, title = 'POLH1 vs sigK' )
+
+
+pc.unk.sig.polh <-  map(sig.unknow, ~ plot_cor.sig(df = sig.sbs %>% left_join(ref.polh), y= '2001_JMB_POLH', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.unk.sig.polh, ncol = 4) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'POLH1 vs SBS' )
+
+pc.ddr.sig.polh <-  map(sig.ddr, ~ plot_cor.sig(df = sig.sbs %>% left_join(ref.polh), y= '2001_JMB_POLH', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.ddr.sig.polh, ncol = 4) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'POLH1 vs SBS' )
+
+pc.other.sig.polh <-  map(sig.other, ~ plot_cor.sig(df = sig.sbs %>% left_join(ref.polh), y= '2001_JMB_POLH', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.other.sig.polh, ncol = 4) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'POLH1 vs SBS' )
+
+```
+
+
+```{r correlation with AID sig}
+ref.aid = read_tsv('_Ref/2015_NC_AID.signatures.txt') %>%
+  mutate(`2015_NC_CLL_Sig.cAID` = `2015_NC_CLL_Sig.cAID`*100,
+         `2015_NC_CLL_Sig.ncAID` = `2015_NC_CLL_Sig.ncAID` *100)
+
+mycosin(df_feature = sig.sbs %>% dplyr::rename(MutationsType = MutationType), ref.aid %>% dplyr::rename(MutationsType = MutationType))
+
+# cAID
+pc.lym.sig.cAID <-  map(sig.lym, ~ plot_cor.sig(df = sig.sbs %>% left_join(ref.aid), y= '2015_NC_CLL_Sig.cAID', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.lym.sig.cAID, nrow = 1) , filename = plot_file, w = 10, h = 3 ,append = T, title = 'cAID vs SBS' )
+
+pc.kat.sig.cAID <-  map(c('Sig.K1', 'Sig.K2'), ~ plot_cor.sig(df = sig.kat %>% left_join(ref.aid), y= '2015_NC_CLL_Sig.cAID', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.kat.sig.cAID, nrow = 1) , filename = plot_file, w = 7, h = 3 ,append = T, title = 'cAID vs Sig.Kataegis' )
+
+
+pc.unk.sig.cAID <-  map(sig.unknow, ~ plot_cor.sig(df = sig.sbs %>% left_join(ref.aid), y= '2015_NC_CLL_Sig.cAID', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.unk.sig.cAID, ncol = 4) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'cAID vs SBS' )
+
+
+#ncAID
+pc.lym.sig.cAID <-  map(sig.lym, ~ plot_cor.sig(df = sig.sbs %>% left_join(ref.aid), y= '2015_NC_CLL_Sig.ncAID', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.lym.sig.cAID, nrow = 1) , filename = plot_file, w = 10, h = 3 ,append = T, title = 'ncAID vs SBS' )
+
+pc.kat.sig.cAID <-  map(c('Sig.K1', 'Sig.K2'), ~ plot_cor.sig(df = sig.kat %>% left_join(ref.aid), y= '2015_NC_CLL_Sig.ncAID', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.kat.sig.cAID, nrow = 1) , filename = plot_file, w = 7, h = 3 ,append = T, title = 'ncAID vs Sig.Kataegis' )
+
+
+pc.unk.sig.cAID <-  map(sig.unknow, ~ plot_cor.sig(df = sig.sbs %>% left_join(ref.aid), y= '2015_NC_CLL_Sig.ncAID', x = .))
+eoffice::topptx(plot_grid(plotlist = pc.unk.sig.cAID, ncol = 4) , filename = plot_file, w = 14, h = 3 ,append = T, title = 'ncAID vs SBS' )
+
+
+
+```
+
+
+## individual gene 
+
+### BLM: whether the mutations in the gene induced more SVs?
+
+```{r BLM}
+tt_blm =  df_sum %>% filter(grepl('BLM', HR)) %>% select(Sample, Subtype, N_SVs_DLBCL, HR)
+
+pf_blm  = df_sum %>% filter(!is.na(N_SVs_DLBCL), Disease == 'DLBCL') %>% mutate(BLM = if_else(grepl('BLM', HR), 'Mutated', 'Unmutated'))
+
+p1 <- ggstripchart(pf_blm, x = 'Disease', y = 'N_SVs_DLBCL', color = 'BLM', size = 0.5, palette = structure(c('red', 'black'), names = c('Mutated', 'Unmutated')))
+p2 <- p1 + coord_cartesian(ylim = c(0,400))
+eoffice::topptx(plot_grid( p1 , p2 , ncol = 2) , filename = plot_file, w = 5, h = 3 ,append = T, title = 'BLM & SV number' )
+
+```
+
+
+### ATM and PLOE induced more mutations?
+```{r ATM and other genes}
+
+genelist.DNArepair = readxl::read_excel('~/OneDrive - KI.SE/Mac/Project/202206_Kataegis/_Ref/DNA repair gene list-marked_v2-20220113-pan.230116-Hui.xlsx', sheet = 'DDRgene_20230116') %>% 
+  cSplit('Pathways', '/', 'long') %>% select(Gene , Pathway = Pathways)
+
+box_ddr.gene <- function(gene, yshow){
+  # xshow = 'MMR'
+  # yshow = 'Total_mutations'
+  
+  my.path = genelist.DNArepair$Pathway[genelist.DNArepair$Gene == gene][1]
+  mydf = df_sum %>% mutate(Mut_status = if_else(grepl(gene, get(my.path)), 'Mutated', 'Unmutated'), Mut_status = factor(Mut_status, levels = c('Mutated', 'Unmutated')))
+  ymax = df_sum %>% pull(yshow)  %>%  quantile(., 0.99, na.rm = T)
+  ggboxplot(mydf %>% filter(!is.na(yshow), Subtype %in% select_subtype), 
+            x = 'Subtype', y = yshow,  order = select_subtype,
+            fill = 'Mut_status', palette = col_mut_stat, xlab =  gene, 
+            legend = 'right',
+            outlier.shape = NA) +
+    stat_compare_means(aes(group = Mut_status),  method = 'wilcox', label = 'p.signif', label.y = ymax, label.x.npc = 'middle') +
+    coord_cartesian(ylim = c(0,ymax)) + rremove('legend')
+
+}
+
+
+pb_mutN_1 = box_ddr.gene(gene = 'ATM',  yshow = 'Total_mutations')
+pb_mutN_2 = box_ddr.gene(gene = 'POLE',  yshow = 'Total_mutations')
+
+eoffice::topptx(plot_grid( pb_mutN_1, ncol = 1) , filename = plot_file, w = 5, h = 3 ,append = T, title = 'ATM  & Total_mutations' )
+eoffice::topptx(plot_grid( pb_mutN_2 , ncol = 1) , filename = plot_file, w = 5, h = 3 ,append = T, title = 'POLE & Total_mutations' )
+
+```
+
+
+
+### JEM paper
+```{r}
+df_xf = readxl::read_excel('~/OneDrive - KI.SE/Mac/Project/202205_JEM_reproduce/0.data/jem_20200573_tables1.xlsx', sheet = 1, skip = 1)
+
+plot_cor <- function( x,df,y){
+  ggscatter(df, x= x, y = y, add = "reg.line", add.params = list(color = "blue")) + 
+    stat_cor(method = "pearson", output.type = 'text') 
+     #stat_cor(method = "spearman", output.type = 'text', cor.coef.name = 'rho', label.x.npc = 'middle') +
+    
+}
+
+
+plot_cor(df = df_xf, y = "IGHV mutations number", x = "Exposure of signature K1" )
+plot_cor(df = df_xf, y = "IGHV mutations number", x = "Exposure of signature K2" )
+
+plot_cor(df = df_xf, y = "IGHV mutations number", x = "Exposure of signature G7" )
+plot_cor(df = df_xf, y = "IGHV mutations number", x = "Exposure of signature G4" )
+
+```
+
+
+```{r}
+stat_sample = df_smp_annt %>% select(BER:Cell_Cycle_Checkpoint)
+names(df_sum)
+```
+

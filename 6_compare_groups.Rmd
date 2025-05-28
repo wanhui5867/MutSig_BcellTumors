@@ -1,0 +1,1063 @@
+---
+title: "compare_disease"
+author: "hui.wan"
+date: "8/23/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, tidy=TRUE, cache=TRUE)
+if (dir.exists('~/OneDrive - KI.SE/')) {
+  knitr::opts_knit$set(root.dir = '~/OneDrive - KI.SE/Mac/Project/202206_Kataegis/')
+} else {
+ knitr::opts_knit$set(root.dir = '~/OneDrive - Karolinska Institutet/Mac/Project/202206_Kataegis/')
+}
+```
+
+# Introduction
+
+This is an R Markdown document to compare signature and kataegis distribution B cell tumors' kataegis.
+After calling signature, kategis and kataegis' signatures, we annoted the kataegis' region.
+
+Here, we need to compare the mutation pattern of different B cell tumors. The main steps include: 
+- total mutations
+- Signature composition
+- kataegis number
+- different kataegis (APOBEC, K1_mean, K1/K2 sample ratio)
+- kataegis's region (IGH: V, DJEm, S; IGL: V, JC; IGK: V, JC; nonIg: TSS ; nonIg; AID-off target): different diseases' hotspots and its K1/K2 composition
+
+```{r load packages}
+library(tidyverse)
+library(cowplot)
+library(ggpubr)
+library(eoffice)
+library(coop)
+library(rstatix)
+library(RColorBrewer)
+library(ggsci)
+library(splitstackshape)
+library(ComplexHeatmap)
+library(paletteer)
+```
+
+
+
+```{r}
+mydir = 'Results/Group_comparsion/'
+dir.create(mydir)
+
+df_sum = read_tsv('0.data/SequencingPerformance.xls') %>% select(SBS = SNV , everything()) %>% 
+  left_join(read_tsv('Results/SBS_Signature/Signature/Activities/SBS96_S16_NMF_Activities.txt'), by = c('Sample' = 'Samples'))  %>% # SBS
+  left_join(read_tsv('1_Signature/Combine/Matrix/Signatures/DBS78/Suggested_Solution/DBS78_De-Novo_Solution/Activities/DBS78_De-Novo_Activities_refit.txt'),
+            by = c('Sample' = 'Samples'))  %>% # DBS
+  left_join(read_tsv('Results/rm_apobec_kataegis/Annotation/Summary_sample_kataegis.xls'))  %>%  #Kataegis
+  left_join(read_tsv('2_Kataegis/apobec_kataegis/Summary_samples.apobecKataegis.tsv') %>% select(Sample, N_kataegis_APOBEC = N))  
+
+write_tsv(df_sum, '0.data//Sample_information.xls')
+df_sum = read_tsv('0.data//Sample_information.xls') %>% 
+  mutate(DINUC = if_else(is.na(DINUC), 0, DINUC),
+         INDEL = if_else(is.na(INDEL), 0, INDEL),
+         Total_mutations = SBS + DINUC + INDEL,
+         N_kataegis = if_else(is.na(N_kataegis), 0 , N_kataegis))
+
+plot_file = 'plot.202211.pptx'
+
+order_disease = c('CLL', 'MCL','BL', 'FL', 'DLBCL', 'MM', 'un-BNHL' )
+order_subtype = c('U-CLL', 'M-CLL', 'cMCL', 'nnMCL', 'BL', 'FL', 'GCB-DLBCL', 'ABC-DLBCL', 'MM','U-DLBCL', 'un-DLBCL', 'un-BNHL')
+select_subtype = c('U-CLL', 'M-CLL',  'cMCL', 'nnMCL', 'BL', 'FL',  'GCB-DLBCL' , 'ABC-DLBCL' , 'MM' )
+
+col_disease = structure( brewer.pal(12, 'Paired')[c(2,4,7, 8, 6, 10, 12 )], names = order_disease)
+col_subtype = structure( brewer.pal(12, 'Paired')[c(1:4, 7:8, 5:6, 10, 11,9,12)], names = order_subtype)
+col_select_subtype = structure( brewer.pal(12, 'Paired')[c(1:4,7:8, 5:6, 10 )],names = select_subtype)
+col_source = structure(pal_jco()(length(unique(phe$Source))), names = unique(phe$Source))
+
+
+order_region5 = c("IGH", "IGL","IGK", "Non-Ig <=2kb", "Non-Ig >2kb" )
+cols_k1 <- c(colorRampPalette(c("blue", "blue"))(33),
+          colorRampPalette(c("blue", 'black',  "red"))(34), 
+          colorRampPalette(c("red", "red"))(33))
+
+
+
+
+my_subytpe = c('BL', 'ABC-DLBCL',  'GCB-DLBCL',  'FL', 'M-CLL', 'nnMCL', 'cMCL', 'N-CLL')
+
+
+
+
+
+# phe = read_tsv('0.data/SequencingPerformance.xls') %>% 
+#   mutate(Subtype = factor(Subtype, level = order_subtype))
+
+phe = df_sum %>%  mutate(Subtype = factor(Subtype, level = order_subtype))
+```
+
+
+# Process
+
+## 0. summary for subtype
+```{r summary}
+
+df_sum_phe = df_sum %>% group_by(Subtype) %>% summarise(N_Sample = n())
+
+df_sum_subtype_mean = df_sum %>% select(Sample, Subtype, where(is.numeric)) %>% 
+  select(-Sample) %>% 
+  gather(content, value, -Subtype) %>% 
+  mutate(value = as.numeric(value)) %>% 
+  group_by(Subtype,content) %>% 
+  summarise(value = mean(value, na.rm = T) ) %>% 
+  spread(content, value)
+
+df_sum_subytpe_total = df_sum %>% 
+  select( -Disease, -Project, -Source, -Subtype, -N_mutation_IGHV) %>%  # old subtype so delete
+  left_join(phe %>% select(Sample, Subtype)) %>% 
+  select(-Sample) %>% 
+  gather(content, value, -Subtype) %>% 
+  mutate(value = as.numeric(value)) %>% 
+  group_by(Subtype,content) %>% 
+  summarise(N_sample_have_kategis = n(), value = sum(value, na.rm = T) ) %>% 
+  spread(content, value)
+
+  
+  
+  
+```
+
+
+## 1. comparsion of mutatio burden (total mutations / mutations per megabase)
+
+```{r total_mut}
+plot_sum = df_sum %>%  mutate( Mutation_per_Mb= (SBS+DINUC+INDEL)/3000)  %>% 
+#plot_sum = df_sum %>%  mutate( Mutation_per_Mb= Total_mutations/3000)  %>% 
+  mutate(Subtype = factor(Subtype, order_subtype)) %>% 
+  arrange(Subtype, Mutation_per_Mb) %>% 
+  group_by(Subtype) %>% 
+  mutate(index_mut = row_number())# 3000 is the mutation number per M(b) %>% 
+
+plot_sum_med = plot_sum %>% group_by(Subtype) %>% summarise(median_mut = median(Mutation_per_Mb), N_sample = n_distinct(Sample))
+  
+
+pb_mut_all_bysubtype = ggplot(plot_sum)  + 
+  geom_jitter(aes(x = index_mut, y = Mutation_per_Mb), size = 0.1) +
+  geom_hline(data = plot_sum_med, mapping =  aes(yintercept = median_mut ), color = 'red') +
+  facet_wrap(~ Subtype, nrow  = 1, scale = 'free_x', strip.position="bottom") +
+    theme_minimal_hgrid() + 
+  yscale("log10", .format = TRUE) +
+  rremove('xlab') + rremove('x.text')
+
+
+eoffice::topptx(pb_mut_all_bysubtype, filename = plot_file, w = 6, h = 3 ,append = T, title = 'all mutations number' )
+
+```
+
+
+- Age and Gender
+
+```{r age subtype}
+gd_age <- df_sum %>% filter(Subtype %in% select_subtype, !is.na(Age), Age != 0) %>%
+  mutate(Subtype = factor(Subtype, levels = select_subtype)) %>% 
+  ggplot( aes(x=Subtype, y=Age, fill = Subtype)) + 
+  geom_boxplot(notch=TRUE, outlier.shape = NA , na.rm = T) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  stat_summary(aes(label=..y..), fun.y= ~ round(mean(.),0), geom="text") +
+  coord_flip() +
+  scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+
+eoffice::topptx(gd_age, filename = plot_file, w = 3, h = 4 ,append = T, title = 'Age' )
+
+```
+
+
+```{r gender subtype}
+gd_gender <- df_sum %>% mutate(Gender = str_to_title(Gender)) %>% 
+   mutate(Subtype = factor(Subtype, levels = select_subtype)) %>% 
+  filter(Subtype %in% select_subtype, !is.na(Gender)) %>% 
+  group_by(Subtype, Gender) %>% 
+  summarise(N = n_distinct(Sample)) %>%  
+  spread(Gender, N)  %>% mutate(Male_pct = Male/(Male+Female) * 100) %>% 
+  ggplot( aes(x=Subtype, y=Male_pct, fill = Subtype)) + 
+  geom_bar(stat = 'identity') +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  geom_hline(yintercept = 50 , lty = 2) +
+  coord_flip() +
+  scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+
+eoffice::topptx(gd_gender, filename = plot_file, w = 3, h = 4 ,append = T, title = 'Gender' )
+
+```
+
+
+
+
+- top: total mutation (SNV+DINUC+DBS) ; middle (percent stacked of distribution)
+```{r final distribution figure}
+order_sample = df_sum %>% mutate(N_mutations = SBS+DINUC+INDEL) %>% 
+   arrange(factor(Disease, levels =  order_disease),
+           factor(Subtype, levels =  order_subtype),
+           -N_mutations)
+
+
+gb_mut <- ggbarplot(df_sum %>% select(Sample, SBS, DINUC,INDEL, Subtype ) %>% gather(MutType, N_mutations, - Sample, -Subtype) %>%
+                      mutate(MutType = factor(MutType, levels = c('SBS', 'DINUC', 'INDEL'))),  
+                    x = 'Sample', y = 'N_mutations', fill = 'MutType', color = NA,
+                    palette = paletteer_dynamic("cartography::grey.pal", n = 3) , 
+                    x.text.angle = 90, order = order_sample$Sample) +
+ coord_cartesian(ylim=c(0,50000)) +
+    theme_void() + 
+  rremove('legend') 
+
+ggsave2(gb_mut, filename = 'Results/SBS_Signature/barplot.mutburden.pdf', w= 10, h = 5)
+ggsave2(gb_mut, filename = 'Results/SBS_Signature/barplot.mutburden.png', w= 10, h = 5)
+
+# percentage SBS
+gb_sig <- ggbarplot(df_sum %>% select(Sample,  starts_with('SBS96') ) %>% gather(Signature, N_mutations, - Sample), 
+                    x = 'Sample', y = 'N_mutations', fill = 'Signature', color = NA, 
+                    palette =paletteer_d("dichromat::GreentoMagenta_16"), 
+          order = order_sample$Sample,position = position_fill()) +
+  theme_void() + 
+  rremove('legend') 
+# ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.mutburden.nolog.pdf', w= 10, h = 5)
+ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.SBS.percent.pdf', w= 10, h = 5)
+ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.SBS.percent.png', w= 10, h = 5)
+
+# percentage DBS
+gb_dbs <- ggbarplot(df_sum %>% select(Sample,  starts_with('DBS') ) %>% gather(Signature, N_mutations, - Sample), 
+                    x = 'Sample', y = 'N_mutations', fill = 'Signature', color = NA, 
+                    palette =paletteer_d("ggthemes::Miller_Stone"), x.text.angle = 90,
+          order = order_sample$Sample,position = position_fill()) +
+  theme_void() + 
+  rremove('legend') 
+# ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.mutburden.nolog.pdf', w= 10, h = 5)
+ggsave2(gb_dbs, filename = 'Results/SBS_Signature/barplot.DBS.percent.pdf', w= 10, h = 5)
+ggsave2(gb_dbs, filename = 'Results/SBS_Signature/barplot.DBS.percent.png', w= 10, h = 5)
+
+
+# percentage Indel
+gb_indel <- ggbarplot(read_tsv('1_Signature/Combine/Matrix//Signatures/ID83/Suggested_Solution/ID83_De-Novo_Solution/Activities/ID83_De-Novo_Activities_refit.txt') %>% 
+                       # ggbarplot(read_tsv('1_Signature/Our/Signatures/ID83/Suggested_Solution/ID83_De-Novo_Solution/Activities/ID83_De-Novo_Activities_refit.txt') %>% 
+                        dplyr::rename(Sample = Samples) %>% right_join(df_sum %>% select(Sample)) %>% 
+                      gather(Signature, N_mutations, - Sample), 
+                    x = 'Sample', y = 'N_mutations', fill = 'Signature', color = NA, 
+                    palette =paletteer_d("ggthemes::wsj_rgby"), x.text.angle = 90,
+          order = order_sample$Sample,position = position_fill()) +
+  theme_void() + 
+  rremove('legend') 
+# ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.mutburden.nolog.pdf', w= 10, h = 5)
+ggsave2(gb_indel, filename = 'Results/SBS_Signature/barplot.Indel.percent.pdf', w= 10, h = 5)
+ggsave2(gb_indel, filename = 'Results/SBS_Signature/barplot.Indel.percent.png', w= 10, h = 5)
+
+
+
+eoffice::topptx(gb_sig,filename = plot_file, w = 10, h = 5 ,append = T )
+```
+
+
+```{r kat bar}
+# gb_kat <- ggbarplot(df_sum %>% mutate(K1_contribution = round(K1_contribution,2)*100) %>% select(Sample, N_kataegis, K1_contribution )  %>% mutate(K1_contribution = factor(K1_contribution)),  
+#                     x = 'Sample', y = 'N_kataegis', fill = 'K1_contribution', color = NA,
+#                     #palette = cols_k1 , 
+#                     x.text.angle = 90, order = order_sample$Sample) + 
+#   scale_fill_manual(values = cols_k1) +rremove('legend') +
+#   rremove('x.text') + rremove('xlab')  + rremove('x.ticks')  + coord_cartesian(ylim=c(0,100))
+
+gb_kat <- ggbarplot(df_sum %>% select(Sample, N_kataegis_APOBEC,  N_kataegis_K1, N_kataegis_K2 , N_kataegis_Unassigned ) %>% 
+                      gather(Kataegis_type, N_kataegis, -Sample)  %>% mutate(Kataegis_type = str_remove(Kataegis_type, 'N_kataegis_')),
+                    x = 'Sample', y = 'N_kataegis', fill = 'Kataegis_type', color = NA,
+                    palette = structure(c("#FF0000","#0000FF", "#00FF00", "#7F7F7F" ), names = c('K1', 'K2', 'APOBEC', 'Unassigned')),
+                    x.text.angle = 90,
+                  #  position = position_fill(),  # 100%
+          order = order_sample$Sample) +
+   #coord_cartesian(ylim=c(0,100)) + 
+  #rremove('legend')  +
+  theme_void()  
+  
+  
+ggsave2(gb_kat, filename = 'Results/SBS_Signature/barplot.kat.pdf', w= 10, h = 5)
+ggsave2(gb_kat, filename = 'Results/SBS_Signature/barplot.kat.png', w= 10, h = 5)
+ggsave2(gb_kat, filename = 'Results/SBS_Signature/barplot.kat.pct.png', w= 10, h = 5)
+
+```
+
+
+```{r sample annotation}
+df_smp_annt = df_sum %>% 
+  select(Sample, Age, Gender, Disease, Subtype, BER, MMR, NER, HR, NHEJ, DDR,FA, `DNA replication`, Cell_Cycle_Checkpoint,  HBSAg, N_mutation_IGHV) %>% 
+  mutate(Age = if_else(Age >60, '>60 y', if_else(Age <= 60, '<=60 y', 'NA') ),
+         BER = if_else(!is.na(BER), 'BER mutated','BER unmutated'),
+         MMR = if_else(!is.na(MMR), 'MMR mutated','MMR unmutated'),
+         HR = if_else(!is.na(HR), 'HR mutated','HR unmutated'),
+         NER = if_else(!is.na(NER), 'NER mutated','NER unmutated'),
+         NHEJ = if_else(!is.na(NHEJ), 'NHEJ mutated','NHEJ unmutated'),
+         FA = if_else(!is.na(FA), 'FA mutated','FA unmutated'),
+         DDR = if_else(!is.na(DDR), 'DDR mutated','DDR unmutated'),
+         `DNA replication` = if_else(!is.na(`DNA replication`), 'DNA replication mutated','DNA replication unmutated'),
+         Cell_Cycle_Checkpoint = if_else(!is.na(Cell_Cycle_Checkpoint), 'Cell_Cycle_Checkpoint mutated','Cell_Cycle_Checkpoint unmutated')
+         ) %>% 
+  gather(content, value, -Sample) %>% mutate(yvalue = 1)
+
+plot_barAnnot <- function(mycontent, color) {
+  ggbarplot(df_smp_annt %>% filter(content == mycontent), palette = color, 
+                x = 'Sample', y= 'yvalue', fill = 'value',  color = NA, order = order_sample$Sample, legend = 'top') + 
+  labs(fill = mycontent) + ylim(0,1) +
+  rremove('legend') +
+  theme(axis.text.x =  element_blank(), axis.text.y =  element_blank(), axis.line =  element_blank(), axis.title = element_blank(), axis.ticks = element_blank()) 
+
+}
+
+gb1 <- plot_barAnnot('Disease', col_disease)
+gb2 <- plot_barAnnot('Subtype', col_subtype)
+gb3 <- plot_barAnnot('Age', structure(c(brewer.pal(8,'Paired')[c(6,5)],  'grey'), names = c('>60 y','<=60 y', 'NA' )))
+gb4 <- plot_barAnnot('Gender',  structure(c(brewer.pal(8,'Paired')[c(8,7)],  'grey'), names = c('Female','Male', 'NA' )))
+gb5 <- plot_barAnnot('BER', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('BER mutated','BER unmutated' )) )
+gb6 <- plot_barAnnot('MMR', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('MMR mutated','MMR unmutated' )) )
+gb7 <- plot_barAnnot('NER', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('NER mutated','NER unmutated' )) )
+gb8 <- plot_barAnnot('HR', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('HR mutated','HR unmutated' )) )
+gb9 <- plot_barAnnot('NHEJ', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('NHEJ mutated','NHEJ unmutated' )) )
+gb10 <- plot_barAnnot('HBSAg', structure(c(brewer.pal(10,'Paired')[c(10, 9)], 'grey'), names = c('+','-', 'NA' )) )
+gb11<- ggbarplot(phe %>% mutate(yvalue = 1), x = 'Sample', y= 'yvalue', fill = 'N_mutation_IGHV', color = NA, order = order_sample$Samples, legend = 'top') + 
+  scale_fill_gradient(low = 'white', high = 'black', na.value = 'white') +
+  rremove('legend') + 
+  theme(axis.text.x =  element_blank(), axis.text.y =  element_blank(),axis.line =  element_blank(), axis.title = element_blank(), axis.ticks = element_blank()) 
+gb12 <- plot_barAnnot('DDR', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('DDR mutated','DDR unmutated' )) )
+gb13 <- plot_barAnnot('DNA replication', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('DNA replication mutated','DNA replication unmutated' )) )
+gb14 <- plot_barAnnot('Cell_Cycle_Checkpoint', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('Cell_Cycle_Checkpoint mutated','Cell_Cycle_Checkpoint unmutated' )) )
+gb15 <- plot_barAnnot('FA', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('FA mutated','FA unmutated' )) )
+
+eoffice::topptx(plot_grid(gb1 ,gb2, gb3,gb4, gb5,gb6,gb7, gb8,gb9, gb10, gb11,gb12, gb13, gb14, ncol = 1) ,filename = plot_file, w = 8, h = 4 ,append = T )
+ggsave(plot_grid(gb1 ,gb2, gb3,gb4, gb5,gb6,gb7, gb8,gb9, gb15, gb12, gb13, gb14, gb10, gb11, ncol = 1),
+       filename = 'Results/SBS_Signature/barplot.mutburden.annotation.reorder.pdf', w= 10, h = 9 )
+ggsave(plot_grid(gb1 ,gb2, gb3,gb4, gb5,gb6,gb7, gb8,gb9, gb15, gb12, gb13, gb14, gb10, gb11, ncol = 1),
+       filename = 'Results/SBS_Signature/barplot.mutburden.annotation.reorder.png', w= 10, h = 9 )
+
+```
+
+
+
+
+```{r pca disease}
+library(umap)
+df_mat= df_sum %>% 
+ # filter(Disease == 'DLBCL') %>% 
+#  filter(Disease == 'MCL') %>% 
+  #filter(Disease == 'FL') %>% 
+  select(Sample,  Disease, Source, Subtype, 
+         SBS, DINUC, INDEL,
+         starts_with('SBS96'), starts_with('DBS78'), 
+         N_kataegis, SigK1 = Exposure_signature_K1, Sigk2 = Exposure_signature_K2 )  %>% 
+  column_to_rownames('Sample')
+
+df_mat[is.na(df_mat)] = 0
+
+# pca_res <- prcomp(df_mat %>% select(-Subtype, -Disease, -Source) %>% as.matrix(), scale. = T)
+# autoplot(pca_res, data = df_sig_mat , colour = 'Subtype') + scale_color_manual(values = col_select_subtype) +
+#   xlim(-0.03, 0.03) + ylim(-0.05, 0.05)  # Not good
+# eoffice::topptx(last_plot( ),filename = plot_file, w = 6, h = 4 ,append = T )
+
+#UMAP
+df_sig_umap= umap(df_mat  %>% select(-Disease, -Source, -Subtype) )
+
+# all color by subtype + shape
+ggscatter(data.frame(umap1 = df_sig_umap$layout[,1], umap2 = df_sig_umap$layout[,2], 
+                     Subtype =df_mat$Subtype,  Source =df_mat$Source),
+          x = 'umap1', y = 'umap2', color =  'Subtype', shape = 'Source', palette =  col_select_subtype) 
+
+eoffice::topptx(last_plot( ),filename = plot_file, w = 6, h = 4 ,append = T, title = 'UMAP: MutBurden+SBS+DBS+Kataegis' )
+
+# all color by subtype
+ggscatter(data.frame(umap1 = df_sig_umap$layout[,1], umap2 = df_sig_umap$layout[,2], 
+                     Subtype =df_mat$Subtype,  Source =df_mat$Source),
+          x = 'umap1', y = 'umap2', color =  'Subtype', palette =  col_select_subtype) 
+
+eoffice::topptx(last_plot( ),filename = plot_file, w = 6, h = 4 ,append = T, title = 'UMAP: MutBurden+SBS+DBS+Kataegis' )
+
+# specific subtype
+ggscatter(data.frame(umap1 = df_sig_umap$layout[,1], umap2 = df_sig_umap$layout[,2], 
+                     Subtype =df_mat$Subtype,  Source =df_mat$Source),
+          x = 'umap1', y = 'umap2', color =  'Source', palette =  col_source) 
+
+eoffice::topptx(last_plot( ),filename = plot_file, w = 6, h = 4 ,append = T, title = 'UMAP: MutBurden+SBS+DBS+Kataegis: FL' )
+
+
+```
+
+
+## 2. comparsion of signature composition
+
+
+
+```{r signature SNV}
+df_sig = read_tsv('Results/SBS_Signature/Signature/Activities/SBS96_S16_NMF_Activities.txt') %>% dplyr::rename(Sample = Samples)
+
+gdf_sig = df_sig %>% gather(Signature, N_mut, -Sample) %>% 
+  group_by(Sample) %>% mutate(N_mut_pct = N_mut/sum(N_mut) *100) %>% ungroup() %>% 
+  left_join(phe)    
+                                                     
+
+# barplot                                                     
+gb_sig <- ggbarplot(gdf_sig %>% group_by(Subtype, Signature) %>% summarize(N_mut_pct_mean = mean(N_mut_pct)) ,
+                    x = 'Subtype', y = 'N_mut_pct_mean', fill = 'Signature',  
+                    palette = paletteer_d("dichromat::GreentoMagenta_16"),
+          order = order_subtype,position = position_fill())
+
+eoffice::topptx(gb_sig, filename = plot_file, w = 6, h = 4 ,append = T, title = 'Signature' )
+
+# dotplot
+
+gd_sig_bySubtype <- ggplot(gdf_sig %>% mutate(Subtype = factor(Subtype, levels = order_subtype)) %>% filter(!is.na(Subtype)), 
+                           aes(x=Signature, y=N_mut_pct, fill = Signature)) + 
+  geom_boxplot(notch=TRUE, outlier.shape = NA) +
+  coord_flip() + 
+  facet_wrap(~ Subtype, scale = 'free_x', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  scale_fill_manual(values =  structure(paletteer_d("dichromat::GreentoMagenta_16"), names = names(df_sig)[-1])) + 
+  rremove('legend')
+eoffice::topptx(gd_sig_bySubtype, filename = plot_file, w = 9, h = 5 ,append = T, title = 'Signature' )
+
+
+# filtering function - turns outliers into NAs to be removed
+filter_lims <- function(x){
+  l <- boxplot.stats(x)$stats[1]
+  u <- boxplot.stats(x)$stats[5]
+
+  for (i in 1:length(x)){
+    x[i] <- ifelse(x[i]>l & x[i]<u, x[i], NA)
+  }
+  return(x)
+}
+
+gd_sig_bySig <- ggplot(gdf_sig %>% filter(Subtype %in% select_subtype) , aes(x=Subtype, y=N_mut_pct, fill = Subtype)) + 
+  geom_boxplot(notch=TRUE, outlier.shape = NA ) +
+  facet_wrap(~ Signature, scale = 'free', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  coord_flip() +
+  scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+
+gd_sig_bySig <- gdf_sig %>% filter(Subtype %in% select_subtype) %>% group_by(Signature)  %>% 
+  mutate(N_mut_pct = filter_lims(N_mut_pct)) %>% mutate(Subtype = factor(Subtype, levels = order_subtype)) %>% 
+  ggplot( aes(x=Subtype, y=N_mut_pct, fill = Subtype)) + 
+  geom_boxplot(notch=TRUE, outlier.shape = NA , na.rm = T) +
+  facet_wrap(~ Signature, scale = 'free_x', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  coord_flip() +
+  scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+
+eoffice::topptx(gd_sig_bySig, filename = plot_file, w = 9, h = 4 ,append = T, title = 'Signature' )
+```
+
+
+
+```{r DBS}
+df_dbs_bd = read_tsv('1_Signature/Combine/Matrix/Signatures/DBS78/Suggested_Solution/DBS78_De-Novo_Solution/Activities/DBS78_De-Novo_Activities_refit.txt')
+
+gdf_sig_dbs = df_dbs_bd %>% dplyr::rename(Sample = Samples) %>% 
+  gather(Signature, N_mut, -Sample) %>% 
+  group_by(Sample) %>% mutate(N_mut_pct = N_mut/sum(N_mut) *100) %>% ungroup() %>% 
+  left_join(phe)  %>% filter(Sample %in% phe$Sample)
+
+gd_dbs_bySig <- gdf_sig_dbs %>% filter(Subtype %in% select_subtype) %>% group_by(Signature)  %>%   
+  mutate(N_mut_pct = filter_lims(N_mut_pct)) %>% 
+  ggplot( aes(x=Subtype, y=N_mut_pct, fill = Subtype)) + 
+  geom_boxplot(notch=TRUE, outlier.shape = NA , na.rm = T) +
+  facet_wrap(~ Signature, scale = 'free_x', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  coord_flip() +
+  scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+
+eoffice::topptx(gd_dbs_bySig, filename = plot_file, w = 6, h = 6 ,append = T, title = 'Signature DBS' )
+
+
+gd_dbs_bySource <- gdf_sig_dbs %>%  
+  #filter(grepl( 'DLBCL', Subtype)) %>% 
+  group_by(Source)  %>%  
+  mutate(N_mut_pct = filter_lims(N_mut_pct)) %>% 
+  ggplot( aes(x=Source, y=N_mut_pct, fill = Source)) + 
+  geom_boxplot(notch=TRUE, outlier.shape = NA , na.rm = T) +
+  facet_wrap(~ Signature, scale = 'free_x', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  coord_flip() +
+  #scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+
+```
+
+
+```{r ID}
+df_id_bd = read_tsv('1_Signature/Combine/Matrix/Signatures/ID83//Suggested_Solution/ID83_De-Novo_Solution/Activities/ID83_De-Novo_Activities_refit.txt')
+gdf_sig_id = df_id_bd %>% dplyr::rename(Sample = Samples) %>% 
+  gather(Signature, N_mut, -Sample) %>% 
+  group_by(Sample) %>% mutate(N_mut_pct = N_mut/sum(N_mut) *100) %>% ungroup() %>% 
+  left_join(phe)  
+
+gd_id_bySig <- gdf_sig_id %>% filter(Subtype %in% select_subtype) %>% group_by(Signature)  %>%   
+  mutate(N_mut_pct = filter_lims(N_mut_pct)) %>% 
+  ggplot( aes(x=Subtype, y=N_mut_pct, fill = Subtype)) + 
+  geom_boxplot(notch=TRUE, outlier.shape = NA , na.rm = T) +
+  facet_wrap(~ Signature, scale = 'free_x', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  coord_flip() +
+  scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+
+eoffice::topptx(gd_id_bySig, filename = plot_file, w = 6, h = 6 ,append = T, title = 'Signature ID' )
+
+
+
+gd_id_bySource <- gdf_sig_id %>%  
+  filter(grepl( 'DLBCL', Subtype)) %>% 
+  group_by(Source)  %>%   
+  mutate(N_mut_pct = filter_lims(N_mut_pct)) %>% 
+  ggplot( aes(x=Source, y=N_mut_pct, fill = Source)) + 
+  geom_boxplot(notch=TRUE, outlier.shape = NA , na.rm = T) +
+  facet_wrap(~ Signature, scale = 'free_x', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  coord_flip() +
+  #scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+```
+
+
+## 3. kataegis
+
+```{r Kategis K1/K2/Kapobec by subtype NOT USED WE COULD USE K1_CONTRIBUTION TO INSTEAD}
+# kataegis mutation number
+df_k_bd = read_tsv('Results/rm_apobec_kataegis/SBS96_2_Signatures/Activities/SBS96_S2_NMF_Activities.txt') %>% 
+  transmute(Sample = str_remove_all(Samples, '\\|.*'), Sig.K1 = SBS96B, Sig.K2 = SBS96A) %>% 
+  group_by(Sample) %>% summarise(Sig.K1 = sum(Sig.K1), Sig.K2 = sum(Sig.K2)) %>% 
+  left_join(read_tsv('2_Kataegis/apobec_kataegis/Matrix/kataegis_apobec.wgs.txt') %>% 
+              group_by(Sample) %>% summarise(Sig.Kapobec = n()) %>% 
+              mutate(Sample = str_remove_all(Sample, '\\|.*')) %>% 
+  group_by(Sample) %>% summarise(Sig.Kapobec = sum(Sig.Kapobec)) ) 
+
+gdf_sig_k = df_k_bd %>% 
+  gather(Signature, N_mut, -Sample) %>% 
+  mutate(N_mut = if_else(is.na(N_mut), 0 , N_mut)) %>% 
+  group_by(Sample) %>% mutate(N_mut_pct = N_mut/sum(N_mut) *100) %>% ungroup() %>% 
+  left_join(phe %>% select(Sample, Subtype))  %>% filter(Sample %in% phe$Sample)
+
+
+# calculated by kataegis number
+df_n_kat = read_tsv('Results/rm_apobec_kataegis/K1contribution.perKataegis.tsv') %>% 
+  mutate(Sample = str_remove_all(kataegis_id, '\\|.*'))  %>% 
+  group_by(Sample, K_source )  %>% summarise(N_kat = n()) %>% 
+  spread(K_source,N_kat , fill =0 ) %>% 
+  right_join(df_sum %>% select(Sample, N_kataegis_APOBEC, N_kataegis))  %>% 
+  select(Sample, N_kataegis_K1 = K1, N_Kategis_K2 = K2, N_kataegis_APOBEC, N_kataegis_unassign = Unassigned, N_kataegis ) 
+
+write_tsv(df_n_kat, file = 'Results/rm_apobec_kataegis/Kataegis_number_source.perSample.tsv', na = '0')
+               
+  
+gdf_sig_k = read_tsv('Results/rm_apobec_kataegis/Kataegis_number_source.perSample.tsv')  %>% 
+  mutate(N_kataegis_total =N_kataegis_K1+ N_Kategis_K2 + N_kataegis_APOBEC +N_kataegis_unassign,
+         diff = N_kataegis_total - N_kataegis)  ### THERE is some diff != 0 , need to check
+  transmute(Sample = Sample, Sig.Kapobec = if_else(is.na(N_kataegis_APOBEC), 0, N_kataegis_APOBEC), 
+         Sig.K1 = round((N_kataegis - Sig.Kapobec)*K1_contribution),
+         Sig.K2 = N_kataegis - Sig.Kapobec - Sig.K1) %>% 
+  gather(Signature, N_kat, -Sample) %>% 
+  mutate(N_kat = if_else(is.na(N_kat), 0 , N_kat)) %>% 
+  left_join(df_sum %>% select(Sample, Subtype, N_kataegis))  %>% 
+   mutate(N_kat_pct = if_else(N_kataegis == 0, 0, N_kat/N_kataegis *100)      ) 
+
+
+
+
+gd_k_bySig <- gdf_sig_k %>% filter(Subtype %in% select_subtype) %>%
+  mutate(Subtype = factor(Subtype, levels =  select_subtype)) %>% 
+  group_by(Signature)  %>%   
+  #mutate(N_kat_pct = filter_lims(N_kat_pct)) %>% 
+  ggplot( aes(x=Subtype, y=N_kat_pct, fill = Subtype)) + 
+  geom_boxplot(notch=F, outlier.shape = NA , na.rm = T) +
+  facet_wrap(~ Signature, scale = 'free_x', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  coord_flip() +
+  scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+```
+
+
+```{r K1 contribution}
+
+gd_k_bySig <- df_sum %>% filter(Subtype %in% select_subtype) %>%
+  mutate(Subtype = factor(Subtype, levels =  select_subtype)) %>% 
+  #mutate(N_kat_pct = filter_lims(N_kat_pct)) %>% 
+  ggplot( aes(x=Subtype, y=K1_contribution, fill = Subtype)) + 
+  geom_boxplot(notch=T, outlier.shape = NA , na.rm = T) +
+  #facet_wrap(~ Signature, scale = 'free_x', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  #coord_flip() +
+  scale_fill_manual(values = col_select_subtype) + 
+  rremove('legend')
+eoffice::topptx(gd_k_bySig, filename = plot_file, w = 2, h = 6 ,append = T, title = 'K1_contribution' )
+eoffice::topptx(gd_k_bySig, filename = plot_file, w = 4, h = 2 ,append = T, title = 'K1_contribution' )
+
+
+
+# compare in in indivition subytpe
+my.subtype = c('U-CLL', 'M-CLL',  'cMCL', 'nnMCL',   'ABC-DLBCL', 'GCB-DLBCL' )
+gd_k_bySig <- df_sum %>% filter(Subtype %in% my.subtype) %>%
+  mutate(Subtype = factor(Subtype, levels =  my.subtype)) %>% 
+  #mutate(N_kat_pct = filter_lims(N_kat_pct)) %>% 
+  ggplot( aes(x=Subtype, y=K1_contribution, fill = Subtype)) + 
+  geom_boxplot(notch=F, outlier.shape = NA , na.rm = T) +
+  scale_fill_manual(values = rep(c('darkgrey', 'white'), 3)) + 
+  stat_compare_means(comparisons = list(c('U-CLL', 'M-CLL'), c('cMCL', 'nnMCL'), c('ABC-DLBCL', 'GCB-DLBCL'))) + 
+  #facet_wrap(~ Signature, scale = 'free_x', nrow = 1) +
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  #coord_flip() +
+  rremove('legend')
+eoffice::topptx(gd_k_bySig, filename = plot_file, w = 4, h = 2 ,append = T, title = 'K1_contribution' )
+
+```
+
+
+```{r kataegis data}
+# apobec kataegis number for per sample
+df_kat_apobec = read_tsv('Results/rm_apobec_kataegis/Annotation/kataegis_annot.xls') %>%
+  # note: IGHkatagies was not seperate; so we use plot_heatmap for non-APOBEC
+  filter(Kategis_group == 'APOBEC') %>% 
+  group_by(Sample) %>% 
+  summarise(N_kataegis = n())
+
+
+# non-apobec kataegis, number & K1
+
+df_kat_heatmap = read_tsv('Results/rm_apobec_kataegis/Annotation/kataegis_region.forheatmap.xls') %>% 
+    filter(!duplicated(Gene)) 
+
+df_kat = df_kat_heatmap %>% 
+  # note: Em,Sm & N_mutations<20 was filtered out in the file
+  gather(Sample, K1_contribution , -Gene, -Group, -Chr, -n_sample, -Index, - Dist_TSS, -AID_offtarget) %>%
+  filter(!is.na(K1_contribution)) %>% 
+  mutate(kataegis_region = if_else(Group == 'IGH', if_else(grepl('IGHV', Gene), 'IGHV', 
+                                                           if_else(grepl('^S', Gene), 'S', 'IGHD,J,Em')),
+                                   if_else(Group == 'IGL', if_else(grepl('V', Gene), 'IGLV', 'IGLJ,C'),
+                                           if_else(Group == 'IGK', if_else(grepl('V', Gene), 'IGKV', 'IGKJ,C'), 
+                                                   if_else(Group == 'Non-Ig <=2kb', 'TSS proximal', 'TSS distal'))))) 
+
+order_region = c('IGHV', 'IGHD,J,Em', 'S', 'IGLV', 'IGLJ,C', 'IGKV', 'IGKJ,C', 'TSS proximal', 'TSS distal', 'APOBEC')
+
+# kataegis number & K1 for per sample
+df_kat_sample = 
+  # Ig + nonIg K1 kataegis for each sample 
+  df_kat %>% select(Sample, kataegis_region, K1_contribution) %>% 
+  group_by(Sample, kataegis_region) %>% 
+  mutate(N_kataegis = n(), K1_contribution = mean(K1_contribution)) %>% 
+  # add_apobec
+  bind_rows(df_kat_apobec %>% mutate(kataegis_region = 'APOBEC'))  %>% 
+    left_join(phe %>% select(-K1_contribution,-N_kataegis), by = 'Sample')  %>% 
+    mutate(Subtype = factor(Subtype, levels = order_subtype),
+         kataegis_region = factor(kataegis_region, levels = order_region))
+  
+write_tsv(df_kat_sample, 'Results/rm_apobec_kataegis/kataegis.forheatmap.persample.tsv')
+
+# kataegis number & K1 for per subtype
+
+df_kat_subtype = df_kat_sample %>% 
+  group_by(Subtype, kataegis_region)  %>% 
+  summarise(K1_contribution = mean(K1_contribution),
+            N_kataegis_sum = sum(N_kataegis),
+            N_kataegis_median = median(N_kataegis)) %>% 
+  left_join(df_sum_phe) %>% 
+  mutate(N_kataegis_per_sample = N_kataegis_sum/N_Sample)  %>% 
+  mutate(Subtype = factor(Subtype, levels = order_subtype),
+         N_kataegis_per_sample_log2 = log2(N_kataegis_per_sample),
+         kataegis_region = factor(kataegis_region, levels = order_region))
+  
+
+```
+
+
+```{r kataegis burden}
+#df_kat_sum = readxl::read_excel('Results/rm_apobec_kataegis/Annotation/kataegis_region.forheatmap.xlsx', sheet = 'sample_information') 
+df_kat_sum = df_sum %>% 
+  mutate(N_kataegis = if_else(!is.na(N_kataegis), N_kataegis, 0 ),
+         N_kataegis_mutations = if_else(!is.na(N_kataegis_mutations), N_kataegis_mutations, 0 ))
+
+table(df_kat_sum$Subtype)
+df_n_sample =  phe %>% group_by(Subtype) %>% summarise(N_sample = n()) %>% 
+  left_join(df_kat_sum %>% group_by(Subtype) %>% summarise(N_sample_have_kataegis = sum(N_kataegis != 0), N_kat_median = median(N_kataegis))) %>% 
+  mutate(pct_sample_have_kat = N_sample_have_kataegis/N_sample * 100)
+
+sum(df_kat_sum$N_kataegis, na.rm = T)
+sum(df_kat_sum$N_kataegis_mutations,  na.rm = T)
+sum(grepl('IG', df_kat$Group ))
+table(df_kat$Group)
+table(df_kat$kataegis_region)
+sum(grepl('V$', df_kat$kataegis_region ))
+sum( df_kat$kataegis_region == 'S')
+
+gv_kat_num <- ggviolin(df_kat_sum %>% filter(Subtype %in% select_subtype) %>% left_join(df_n_sample) ,
+         x = 'Subtype', y = 'N_kataegis', order = select_subtype,
+         fill = 'pct_sample_have_kat', palette = 'Rd', 
+         #palette = col_select_subtype,
+          width = 1.5,
+         add = 'median_iqr',add.params = list(size = 0.2) )+
+        # add = "boxplot", add.params = list(fill = "white", size = 0.2, width = 0.1) ) + 
+  ylim(0,20) + 
+  #scale_fill_gradient2(low = "blue", mid = "white", high = "red")
+  scale_fill_material("amber") 
+
+eoffice::topptx(gv_kat_num, filename = plot_file, w = 4, h = 3 ,append = T, title = 'Kataegis number' )
+
+```
+
+
+
+```{r dotplot}
+hist(df_kat_subtype$N_kataegis_per_sample, breaks = 100)
+gp_subytpe = ggplot(df_kat_subtype %>% filter(Subtype %in% select_subtype) %>% mutate(Subtype = factor(Subtype, levels = select_subtype))) +
+  geom_point(aes(x = kataegis_region, y = Subtype, 
+                   color = K1_contribution, size = N_kataegis_per_sample_log2)) +
+  #scale_size_continuous(breaks = c(0.01, 0.1, 0.5, 1, 3, 5), range = c(0,5) ) +
+  scale_size_continuous(breaks = c(-4, -2, 0, 2, 4), range = c(-4,6) ) +
+  scale_color_gradientn(colors = c("blue", "blue", 'black',  "red", "red"), na.value = 'darkgreen',
+                             values = scales::rescale(c(0, 0.33, 0.5, 0.67,1))) + 
+  theme_bw()
+
+# need to re-scalesize
+
+eoffice::topptx(gp_subytpe, filename = plot_file, w = 10, h = 3 ,append = T, title = 'Kataegis' )
+
+
+# manually order subtype
+#my_subytpe = c('BL', 'ABC-DLBCL', 'U-DBLCL', 'GCB-DLBCL',  'FL', 'M-CLL', 'nnMCL', 'cMCL', 'N-CLL')
+my_subytpe = c('BL', 'ABC-DLBCL',  'GCB-DLBCL',  'FL', 'M-CLL', 'nnMCL', 'cMCL', 'U-CLL','MM')
+
+ggplot(df_kat_subtype %>% filter(Subtype %in% my_subytpe) %>% mutate(Subtype = factor(Subtype, levels = my_subytpe))) +
+  geom_point(aes(x = kataegis_region, y = Subtype, 
+                   color = K1_contribution, size = N_kataegis_per_sample_log2)) +
+  #scale_size_continuous(breaks = c(0.01, 0.1, 0.5, 1, 3, 5), range = c(0,5) ) +
+  scale_size_continuous(breaks = c(-4, -2, 0, 2, 4), range = c(-4,6) ) +
+  scale_color_gradientn(colors = c("blue", "blue", 'black',  "red", "red"),  na.value = '#00B050', 
+                             values = scales::rescale(c(0,0.33,0.5, 0.67,1))) + 
+  theme_bw()
+
+eoffice::topptx(last_plot(), filename = plot_file, w = 10, h = 3 ,append = T, title = 'Kataegis' )
+
+ggsave(last_plot(), filename = 'kataegis.distribution.pdf', w = 10, h = 2)
+ggsave(last_plot(), filename = 'kataegis.distribution.h4.pdf', w = 10, h = 4)
+
+```
+
+
+
+```{r Kat barplot NEED to do data format}
+ gv_subytpe.apobec <- ggviolin(df_kat_sum %>% filter(Subtype %in% select_subtype, kataegis_region == 'APOBEC') %>% left_join(df_n_sample) ,
+         x = 'Subtype', y = 'N_kataegis', order = select_subtype,
+         fill = 'pct_sample_have_kat', palette = 'Rd', 
+         #palette = col_select_subtype,
+          width = 1.5,
+         add = 'median_iqr',add.params = list(size = 0.2) )+
+        # add = "boxplot", add.params = list(fill = "white", size = 0.2, width = 0.1) ) + 
+  ylim(0,20) + 
+  #scale_fill_gradient2(low = "blue", mid = "white", high = "red")
+  scale_fill_material("amber") 
+
+eoffice::topptx(gd_gender, filename = plot_file, w = 3, h = 4 ,append = T, title = 'Gender' )
+```
+
+
+
+
+```{r violin plot}
+
+
+gd_subtype <- ggstripchart(df_kat_sample %>% filter(kataegis_region != 'APOBEC'), 
+             x = 'kataegis_region', y = 'K1_contribution',  color = 'K1_contribution', size = 0.1,
+             add = 'violin', ylim = c(0,1), ylab = F,
+             facet.by = 'Subtype', strip.position="right", ncol = 1) +
+    scale_color_gradientn(colors = c("blue", "blue", 'black',  "red", "red"),
+                             values = scales::rescale(c(0,0.33,0.5, 0.67,1)))  +
+  rremove('legend') +
+   scale_y_continuous(breaks = get_breaks(n = 3))
+
+
+
+ gv_subytpe <- ggviolin(df_kat_sample, 
+              x = 'kataegis_region', y = 'K1_contribution', 
+              draw_quantiles = T, add = 'median_iqr', add.params = list(size = 0.2),
+              ylim = c(0,1), ylab = F,
+              #add = 'jitter', 
+              facet.by = 'Subtype',  strip.position="right", ncol = 1) +
+      scale_y_continuous(breaks = get_breaks(n = 3))
+
+
+
+# need to re-scale color and size
+gd_subytpe
+eoffice::topptx(gd_subtype, filename = plot_file, w = 8, h = 6 ,append = T, title = 'Kataegis' )
+eoffice::topptx(gv_subytpe, filename = plot_file, w = 8, h = 6 ,append = T, title = 'Kataegis' )
+
+```
+
+
+```{r heatmap with filtered}
+# filter out several genes in each group (< 10% samples)
+df_kat_gene = df_kat %>% left_join(phe %>% select(Sample, Subtype)) %>% 
+  group_by(Subtype, Gene, kataegis_region) %>% 
+  summarise(N_kataegis_sum = n(), K1_contribution = mean(K1_contribution)) %>% 
+  left_join(df_sum_phe) %>% 
+  mutate(N_kataegis_per_sample = N_kataegis_sum/N_Sample,
+         N_kataegis_per_sample_log2 = log2(N_kataegis_per_sample)) 
+
+gene_list = df_kat_gene %>% filter(N_kataegis_per_sample >= 0.1)  %>% pull(Gene) %>% unique()
+
+
+
+# K1 contribution
+df_kat_heatmap_filter_k1 = df_kat_gene %>% filter(Gene %in% gene_list)  %>% 
+  ungroup() %>% 
+  select(Gene, K1_contribution, Subtype) %>% 
+  spread(Subtype, K1_contribution) %>% 
+  left_join(df_kat %>% select(Gene, kataegis_region, Group, Index) %>% unique()) %>% 
+  #mutate(kataegis_rgion = factor(kataegis_region, levels = order_region)) %>% 
+  arrange(match(kataegis_region, order_region), Index) %>% 
+  filter(!duplicated(Gene))
+
+
+
+annot_col = df_kat_heatmap_filter_k1 %>% select(Gene, Group)  %>% column_to_rownames('Gene')
+ann_colors = list(Group = structure(pal_jco()(5), names = order_region5))
+
+ph_k1 <- pheatmap(subset(df_kat_heatmap_filter_k1, select = c('Gene',order_subtype)) %>% column_to_rownames('Gene') %>% t(),
+                   cluster_rows = F, cluster_cols = F, color = cols_k1, scale = 'none',
+                   annotation_col = annot_col , 
+                   annotation_colors = ann_colors,
+                   column_split = annot_col$Group,
+                  heatmap_legend_param = list(direction = "horizontal"),
+                   annotation_legend = F,
+                  name = 'K1 contribution'
+                   )
+
+
+
+# kataegis number per sample
+df_kat_heatmap_filter_n = df_kat_gene %>% filter(Gene %in% gene_list)  %>% 
+  ungroup() %>% 
+  select(Gene, N_kataegis_per_sample_log2, Subtype) %>% 
+  spread(Subtype, N_kataegis_per_sample_log2) %>% 
+  left_join(df_kat %>% select(Gene, kataegis_region, Group, Index) %>% unique()) %>% 
+  #mutate(kataegis_rgion = factor(kataegis_region, levels = order_region)) %>% 
+  arrange(match(kataegis_region, order_region), Index) %>% 
+  filter(!duplicated(Gene))
+
+
+#annot_col = df_kat_heatmap_filter_n %>% select(Gene, Group)  %>% column_to_rownames('Gene')
+
+ph_kn <- pheatmap(subset(df_kat_heatmap_filter_n, select = c('Gene',order_subtype)) %>% column_to_rownames('Gene') %>% t(),
+                   cluster_rows = F, cluster_cols = F, 
+                  #cellwidth=10, cellheight=10,
+                  #scale = 'column',
+                   annotation_col = annot_col , 
+                   column_split = annot_col$Group,
+                   annotation_colors = ann_colors,
+                   heatmap_legend_param = list(direction = "horizontal"),
+                  annotation_legend = F,
+                   name = 'Kataegis number'
+                   )
+
+
+ph_k1 + ph_kn
+draw(ph_k1  , merge_legend = TRUE, heatmap_legend_side = "bottom")
+
+
+eoffice::topptx(ph_k1, filename = plot_file, w = 8, h = 5 ,append = T, title = 'Kataegis' )
+eoffice::topptx(ph_kn, filename = plot_file, w = 8, h = 5 ,append = T, title = 'Kataegis' )
+
+
+```
+
+
+
+
+```{r kataegis number  not run yet}
+
+
+gb_kat <- ggbarplot(gdf_kat, x = 'Subytpe', y = 'N_kataegis', fill = 'group3',  palette = 'pal_jco', 
+          order = order_subtype, add = "mean_se", position = position_dodge(0.9, preserve = 'single'))
+
+eoffice::topptx(gb_kat, filename = plot_file, w = 4, h = 3 ,append = T, title = 'Kategis' )
+
+ggtexttable(gdf_kat, rows = NULL, theme = ttheme("light"))
+```
+
+
+# Cluster & evolution
+try to use scRNAseq method to cluster subtype and figure out the trajectory time of them
+- expression data: rows are genes, and columns are cells
+- cell metadata: rows are cells, and columns are cell attributes
+- gene metadata: rows are features (e.g. genes), and columns are gene attributes
+
+```{r prepare data NOT USE}
+#Here, we consider kataegis' target as genes/region, and samples as cells, expression data are K1 contribution
+# BUG: can not find a good value to fill NA 
+
+library(monocle3)
+expression_data = df_kat_heatmap %>% 
+  select( -Group, -Chr, -n_sample, -Index, - Dist_TSS, -AID_offtarget)  %>% 
+  column_to_rownames('Gene') 
+# consider NA to 0, but 0 have special meaning; and the sample have no kataegis
+# add kataegis number matrix
+# modify gene to region
+expression_matrix = as.matrix(expression_data)
+colnames(expression_matrix) = names(expression_data)
+expression_matrix[is.na(expression_matrix)] <- 2
+
+cell_metadata = data.frame(Sample = colnames(expression_matrix)) %>% 
+  left_join(phe) %>% column_to_rownames('Sample')
+
+gene_annotation = data.frame(Gene = row.names(expression_matrix)) %>%
+  left_join(df_kat  %>% select(Gene, Group, kataegis_region, Index, Dist_TSS, AID_offtarget))  %>% 
+  filter(!duplicated(Gene)) %>% column_to_rownames('Gene')
+  
+# Make the CDS object
+cds <- new_cell_data_set(as.matrix(expression_matrix),
+                         cell_metadata = cell_metadata,
+                         gene_metadata = gene_annotation)
+```
+
+
+
+```{r prepare data}
+#Here, we consider kataegis' target as genes/region, and samples as cells, expression data are K1_number and K2_number
+
+library(monocle3)
+
+df_shower_split_annot =  read_tsv('rm_apobec_kataegis/Annotation/kataegis_annot_split.xls')   %>%   mutate(Sample = str_remove_all(kataegis_id, '\\|.*'))  
+
+
+
+expression_data = df_shower_split_annot %>% filter(Gene != 'APOBEC') %>% 
+  select(Sample, Gene, N_mut_K1, N_mut_K2)  %>%  
+  group_by(Sample, Gene) %>% 
+  summarise(K1 = sum(N_mut_K1, na.rm = T), K2 = sum(N_mut_K2, na.rm = T)) %>% 
+  gather(sigK , N_mut, -Sample, -Gene) %>% 
+  unite('K_Gene', sigK, Gene, sep = '|') %>% 
+  # bind K apobec
+  bind_rows(df_shower_split_annot %>% filter(Gene == 'APOBEC') %>% group_by(Sample) %>% summarise(N_mut = sum(mutation_number)) %>% mutate(K_Gene = 'APOBEC') ) %>% 
+  spread(Sample, N_mut, fill = 0) %>% 
+  column_to_rownames('K_Gene') 
+
+expression_matrix = as.matrix(expression_data)
+colnames(expression_matrix) = names(expression_data)
+#expression_matrix = expression_matrix[rowSums(expression_matrix) >= 10, ]
+expression_matrix = expression_matrix[, - which(colSums(expression_matrix) == 0)] # if not remove cell with col_sum == 0, error in names(sf)
+
+
+cell_metadata = data.frame(Sample = colnames(expression_matrix)) %>% 
+  left_join(phe) %>% column_to_rownames('Sample')
+
+gene_annotation = data.frame(K_Gene = row.names(expression_matrix)) %>% separate(K_Gene, c('sigK', 'Gene'), sep = '\\|', remove = F) %>% 
+  left_join(df_kat  %>% select(Gene, Group, kataegis_region, Index, Dist_TSS, AID_offtarget) )  %>%
+  mutate(Gene = if_else(sigK == 'APOBEC',  'APOBEC', Gene)) %>% 
+  mutate(gene_short_name = str_c('Gene', row_number())) %>% 
+  filter(!duplicated(K_Gene)) %>% 
+  column_to_rownames('K_Gene')
+
+
+  
+# Make the CDS object
+rm(cds)
+cds <- new_cell_data_set(expression_data = expression_matrix,
+                         cell_metadata = cell_metadata,
+                         gene_metadata = gene_annotation)
+
+cds <- preprocess_cds(cds, num_dim = 100)
+
+#write.table(expression_matrix, file = 'kataegis_matrix_for_monocle.txt', col.names = T, row.names = T, sep = '\t', quote = F )
+
+save(expression_matrix, cell_metadata, gene_annotation, file = 'kataegis_matrix_for_monocle.RData', ascii = T)
+
+cds
+
+```
+
+
+
+
+```{r cluster}
+## Step 3: Reduce the dimensions using UMAP
+cds <- preprocess_cds(cds, num_dim = 100)
+plot_pc_variance_explained(cds)
+
+cds <- reduce_dimension(cds)
+plot_cells(cds, color_cells_by="Subtype")
+plot_cells(cds, color_cells_by="Source", label_cell_groups=FALSE)
+plot_cells(cds, genes=c("IGHV", "S" ))
+
+## Step 4: Cluster the cells
+cds = cluster_cells(cds, resolution=1e-5)
+plot_cells(cds)
+plot_cells(cds, color_cells_by="Subtype", label_groups_by_cluster=T)
+
+## find markder genes
+marker_test_res <- top_markers(cds, group_cells_by="Subtype", 
+                               reference_cells=1000, cores=8)
+
+
+# top_specific_markers <- marker_test_res %>%
+#                             filter(fraction_expressing >= 0.10) %>%
+#                             group_by(cell_group) %>%
+#                             top_n(3, pseudo_R2)
+# 
+# top_specific_marker_ids <- unique(top_specific_markers %>% pull(gene_id))
+# 
+# plot_genes_by_group(cds,
+#                     top_specific_marker_ids,
+#                     group_cells_by="partition",
+#                     ordering_type="cluster_row_col",
+#                     max.size=3)
+```
+
+
+```{r trajectory}
+# preprocess
+
+cds <- preprocess_cds(cds, num_dim = 50)
+cds <- align_cds(cds, preprocess_method = 'PCA', alignment_group = "Subtype")
+#cds <- align_cds(cds, alignment_group = "Subtype", residual_model_formula_str = "~ bg.300.loading + bg.400.loading + bg.500.1.loading + bg.500.2.loading + bg.r17.loading + bg.b01.loading + bg.b02.loading") # need understand the parameters and modify
+
+cds <- reduce_dimension(cds,  reduction_method = 'UMAP' )
+#plot_cells(cds, label_groups_by_cluster=FALSE,  color_cells_by = "Subtype")
+
+
+#ciliated_genes <- c('IGHV', 'S')
+
+#plot_cells(cds,  genes=ciliated_genes,  label_cell_groups=FALSE,         show_trajectory_graph=FALSE)
+
+## cluster
+cds <- cluster_cells(cds)
+#plot_cells(cds, color_cells_by = "partition")
+
+## Step 5: Learn a graph
+cds <- learn_graph(cds)
+plot_cells(cds,
+           color_cells_by = "Subtype",
+           label_groups_by_cluster=FALSE,
+           label_leaves=T,
+           group_label_size = 4,
+           cell_size = 1.5,
+           label_branch_points=FALSE)
+
+## Step 6: Order cells
+cds <- order_cells(cds)
+plot_cells(cds,
+           color_cells_by = "Subtype",
+           label_cell_groups=FALSE,
+           label_leaves=TRUE,
+           label_branch_points=TRUE,
+           graph_label_size=1.5)
+
+plot_cells(cds)
+```
+
+```{r save}
+save(df_kat_heatmap, df_kat, df_kat_subtype, df_kat_sample, df_kat_gene, gene_list, file =  'K1_contribution.Rdata')
+
+```
+
+

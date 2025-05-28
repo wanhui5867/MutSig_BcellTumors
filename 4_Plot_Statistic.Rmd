@@ -1,0 +1,780 @@
+---
+title: "plot_analysis"
+author: "hui.wan"
+date: "11/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, tidy=TRUE, cache=TRUE)
+
+knitr::opts_knit$set(root.dir = '~/OneDrive - Karolinska Institutet/Documents/Project/Kataegis_2023/')
+```
+
+## R Markdown
+
+This is an R Markdown document to analysis and visulization of B cell tumors.
+
+```{r load packages}
+library(tidyverse)
+library(cowplot)
+library(ggpubr)
+library(eoffice)
+library(coop)
+library(rstatix)
+library(paletteer)
+library(RColorBrewer)
+library(ggsci)
+```
+
+## set variables
+```{r}
+phe = read_tsv( '0.data/Sample_clinicInfo.addDNArepair.tsv', na = '') 
+
+order_disease = c('CLL', 'MCL','BL', 'FL', 'DLBCL', 'MM', 'un-BNHL' )
+order_subtype = c('U-CLL', 'M-CLL', 'cMCL', 'nnMCL', 'BL', 'FL', 'GCB-DLBCL', 'ABC-DLBCL', 'MM','U-DLBCL', 'un-DLBCL', 'un-BNHL')
+select_subtype = c('U-CLL', 'M-CLL',  'cMCL', 'nnMCL', 'BL', 'FL',  'GCB-DLBCL' , 'ABC-DLBCL' , 'MM' )
+
+col_disease = structure( brewer.pal(12, 'Paired')[c(2,4,7, 8, 6, 10, 12 )], names = order_disease)
+col_subtype = structure( brewer.pal(12, 'Paired')[c(1:4, 7:8, 5:6, 10, 11,9,12)], names = order_subtype)
+col_select_subtype = structure( brewer.pal(12, 'Paired')[c(1:4,7:8, 5:6, 10 )],names = select_subtype)
+col_source = structure(pal_jco()(length(unique(phe$Source))), names = unique(phe$Source))
+
+plot_file = 'plot.2024.pptx'
+```
+
+
+## Functions
+```{r}
+
+mycosin <- function(df_feature, ref) {
+  cosine(ref %>% left_join(df_feature, by = 'MutationsType') %>% 
+           select(-MutationsType) %>% as.matrix()   )  %>%  
+    as.data.frame() %>% 
+  select(starts_with('SBS96')) %>% 
+  rownames_to_column('Signature') %>% 
+  filter(!grepl('^SBS96[A-Z]', Signature ))
+}
+
+mycosin_dbs <- function(df_feature, ref) {
+  cosine(ref %>% left_join(df_feature, by = 'MutationsType') %>% 
+           select(-MutationsType) %>% as.matrix()   )  %>%  
+    as.data.frame() %>% 
+  select(starts_with('DBS78')) %>% 
+  rownames_to_column('Signature') %>% 
+  filter(!grepl('^DBS78[A-Z]', Signature ))
+}
+
+
+mycosin_id <- function(df_feature, ref) {
+  cosine(ref %>% left_join(df_feature, by = 'MutationsType') %>% 
+           select(-MutationsType) %>% as.matrix()   )  %>%  
+    as.data.frame() %>% 
+  select(starts_with('ID83')) %>% 
+  rownames_to_column('Signature') %>% 
+  filter(!grepl('^ID83[A-Z]', Signature ))
+}
+
+```
+
+
+## Mutational burden
+
+Summary mutational burden including snv, dinuc, indel in each project/disease.
+
+```{r read data}
+df = read_tsv('1_Signature/Combine/Matrix/input/all.wgs.txt') %>% filter(Sample %in% phe$Sample)
+nrow(phe)
+
+phe %>% group_by(Disease) %>% summarise(n = n()) 
+phe %>% group_by(Subtype) %>% summarise(n = n()) 
+
+phe %>% group_by(Subtype, Source) %>% summarise(n = n()) %>% spread(Source, n)
+
+```
+
+
+
+```{r SBS}
+
+df_sbs = read_tsv('1_Signature/Combine/Matrix/output/SBS/all.SBS96.all')%>% 
+  gather(Sample, n ) %>% mutate(n = as.numeric(n)) %>% 
+  filter(Sample %in% phe$Sample) %>% 
+  group_by(Sample ) %>% summarise(SNV = sum(n)) 
+
+ggboxplot(df_sbs %>%  left_join(phe) %>% filter(!is.na(Subtype)) ,  x= 'Subtype', y = 'SNV', order = order_subtype, 
+          fill = 'Subtype', palette = col_subtype, x.text.angle = 30)  +
+  rremove('legend')
+
+eoffice::topptx(last_plot(), filename = plot_file, w = 4, h = 3 ,append = T, title = 'SBS number' )
+
+```
+
+
+```{r DBS}
+
+df_dbs = read_tsv('1_Signature/Combine/Matrix/output/DBS/all.DBS78.all') %>% 
+  gather(Sample, n ) %>% mutate(n = as.numeric(n)) %>% group_by(Sample ) %>% summarise(DINUC = sum(n)) 
+ggboxplot(df_dbs  %>%  left_join(phe) %>% filter(!is.na(Subtype)),  x= 'Subtype', y = 'DINUC', order = order_subtype, 
+          fill = 'Subtype', palette = col_subtype, x.text.angle = 30)  +
+  rremove('legend')
+
+eoffice::topptx(last_plot(), filename = plot_file, w = 4, h = 3 ,append = T, title = 'DINUC number' )
+
+```
+
+
+```{r indel}
+
+df_indel = read_tsv('1_Signature/Combine/Matrix/output/ID/all.ID83.all') %>% 
+  gather(Sample, n ) %>% mutate(n = as.numeric(n)) %>% group_by(Sample ) %>% summarise(INDEL = sum(n)) 
+
+ggboxplot(df_indel %>%  left_join(phe) %>% filter(!is.na(Subtype))   %>% filter(INDEL != 0), 
+         #add = 'median_q1q3',
+         x= 'Subtype', y = 'INDEL', fill = 'Subtype', order = order_subtype, 
+         palette = col_subtype, x.text.angle = 30)  +
+  coord_cartesian(ylim = c(0,5000)) + 
+  rremove('legend')
+eoffice::topptx(last_plot(), filename = plot_file, w = 4, h = 3 ,append = T, title = 'InDel number' )
+
+ggviolin(df_indel %>%  left_join(phe) %>% filter(Source == 'Our') %>% 
+           filter(!is.na(Subtype))   %>% filter(INDEL != 0), 
+         add = 'median_q1q3',
+         x= 'Subtype', y = 'INDEL', fill = 'Subtype',
+         palette = col_subtype, x.text.angle = 30)  +
+  rremove('legend')
+
+eoffice::topptx(last_plot(), filename = plot_file, w = 3, h = 2 ,append = T, title = 'InDel number' )
+
+```
+
+
+
+
+
+- Mutation burden
+```{r}
+# df_mut_bur = df %>% group_by(Sample, mut_type) %>% 
+#   summarize(n = n()) %>%   # 3000 is the mutation number per M(b)
+#   left_join(phe)
+df_mut_number = df_sbs %>% left_join(df_dbs) %>% left_join(df_indel) 
+df_mut_bur = df_mut_number %>% mutate(n = SNV + DINUC + INDEL) %>% left_join(phe)
+
+
+pb_s <- ggpubr::ggboxplot(df_mut_bur, x = 'Source', y = 'n', facet.by = 'mut_type', scale = 'free_y', x.text.angle = 60, ylab = 'Mutation number per Mb')
+pb_d <- ggpubr::ggboxplot(df_mut_bur, x = 'Disease', y = 'n', facet.by = 'mut_type', scale = 'free_y', x.text.angle = 60,  ylab = 'Mutation number per Mb')
+
+pb_sd <- plot_grid(pb_s, pb_d, ncol = 1, labels = c('A', 'B')  )
+eoffice::topptx(pb_sd,filename = plot_file, w = 8, h = 6 ,append = T )
+
+```
+
+
+
+
+- In uppmax to run annovar annot for the mutations
+
+```{bash}
+/proj/snic2020-6-100/private/annovar/20221118_katagis_all
+awk '{print $6,$7,$8,$9,$10,$2}' ../../20201101_Kataegis/1_Signature/Combine/input/all.wgs.txt | sed '1d' > all.wgs.avinput
+
+module load bioinfo-tools
+module load annovar
+module load annovar_data
+annotate_variation.pl -geneanno -dbtype refGene -buildver hg19 all.wgs.avinput $ANNOVAR_DATA/humandb
+
+```
+
+
+```{r nonsilent mutations}
+
+nosilent_type = c('nonsynonymous SNV', 'splicing', 'stopgain', 'stoploss', 'frameshift deletion', 'frameshift insertion', 'nonframeshift deletion', 'nonframeshift insertion')
+
+# mut.func = read_tsv('Results/SBS_Signature/all.wgs.avinput.variant_function',  col_names = c( 'Region', 'Func.Gene', "Chr", "Start","End", "Ref","Alt", "Sample")) %>% 
+#    #separate(Input, c("Chr", "Start","End", "Ref","Alt", "Sample"), sep = ' ') %>% 
+#    filter(grepl('exonic',Region) | grepl('ncRNA',Region) | grepl('splicing',Region) | grepl('UTR', Region)) %>% 
+#   group_by(Sample) %>% summarise(N_nonsilent_mutations = n())
+
+mut.func.splicing = read_tsv('Results/SBS_Signature/all.wgs.avinput.variant_function',  col_names = c( 'Region', 'Func.Gene', "Chr", "Start","End", "Ref","Alt", "Sample")) %>%
+   #separate(Input, c("Chr", "Start","End", "Ref","Alt", "Sample"), sep = ' ') %>%
+   filter(Region %in% c("splicing", "exonic;splicing" )) %>%
+   group_by(Sample) %>% summarise(N_splicing = n())
+
+
+
+mut.func.exonic = read_tsv('Results/SBS_Signature/all.wgs.avinput.exonic_variant_function',  col_names = c( 'Line','Func.Alt', 'Func.Gene', 'Input')) %>% 
+   separate(Input, c("Chr", "Start","End", "Ref","Alt", "Sample"), sep = ' ') %>% 
+   #filter(Func.Alt != 'synonymous SNV') %>%  # silent Mutation
+   filter(Func.Alt %in% nosilent_type) %>%  # non-silent Mutation
+   group_by(Sample) %>% summarise(N_nonsilent_mutations = n())
+
+
+
+write_tsv(phe %>% left_join(df_mut_number)  %>%   left_join(mut.func) %>% left_join(mut.func.exonic)  %>% left_join(mut.func.splicing), '0.data/SequencingPerformance.xls')
+
+write_tsv(mut.func.exonic %>% left_join(mut.func.splicing) , '0.data/N_nonslientMutation.xls', na = '0')
+
+```
+
+
+```{r total mutation number }
+total_mut_num = df_mut_number %>% select(SNV, DINUC, INDEL, N_nonsilent_mutations) %>% colSums()
+total_mut_num
+```
+
+
+```{r correlation among different variant types}
+q90_snv = quantile(df_mut_number$SNV, 0.9)
+q90_dbs = quantile(df_mut_number$DINUC, 0.9)
+q90_indel = quantile(df_mut_number$INDEL, 0.9)
+
+ps_snv_dinuc <- ggscatter(df_mut_number, x = 'SNV', y = 'DINUC', color = 'Subtype', palette = col_subtype,  legend = 'none') +
+  #stat_cor(aes(color = Type), cor.coef.name = 'rho', method = 'spearman') + 
+   stat_cor(cor.coef.name = 'rho', method = 'spearman') +
+  xlim(0,q90_snv) + ylim(0,q90_dbs)
+         
+
+ps_snv_indel<- ggscatter(df_mut_number %>% filter(Subtype != 'MM'),  # MM have no indel information
+                         x = 'SNV', y = 'INDEL', color = 'Subtype', palette = col_subtype, legend = 'none') +
+   stat_cor(cor.coef.name = 'rho', method = 'spearman')  +
+    xlim(0,q90_snv) + ylim(0,q90_indel)
+
+
+ps_dinuc_indel<- ggscatter(df_mut_number %>% filter(Subtype != 'MM'),
+                           x = 'DINUC', y = 'INDEL', color = 'Subtype', palette = col_subtype, legend = 'none') +
+   stat_cor(cor.coef.name = 'rho', method = 'spearman')  +
+    xlim(0,q90_dbs) + ylim(0,q90_indel)
+
+
+theme_set(theme_classic2(base_size = 8, base_family = "Arial"))
+fig_S1 <- ggarrange(ps_snv_dinuc,  ps_snv_indel, ps_dinuc_indel,
+                   nrow = 1, ncol = 3) 
+
+ggsave(fig_S1, filename = paste0( 'Results/Group_comparsion/Correlation.mutationTypes.png'), w = 10, h = 3)
+```
+
+
+```{r by subtype}
+df_mut_bur_Subtype =  phe %>% left_join(df_mut_number)  %>%   left_join(mut.func) %>% 
+  select(Disease, Subtype,  SNV, DINUC, INDEL,N_nonsilent_mutations ) %>% 
+  gather(Content, value, -Disease, -Subtype) %>% 
+  group_by(Disease, Subtype, Content) %>% 
+  summarise(mean = mean(value), min = min(value), max = max(value) )  %>% 
+  mutate(value = paste0(round(mean, 0), ' (', min, '-', max, ')')) %>% 
+  select(Disease, Subtype, Content, value) %>% 
+  spread(Content, value)
+
+write_tsv(df_mut_bur_Subtype, '0.data/SequencingPerformance.subtype.xls')
+  
+```
+
+
+
+```{r total_mut}
+plot_sum = df_mut_number %>% left_join(phe) %>% 
+  mutate( Mutation_per_Mb= (SNV+DINUC)/3000)  %>% 
+  mutate(Subtype = factor(Subtype, order_subtype)) %>% 
+  arrange(Subtype, Mutation_per_Mb) %>% 
+  group_by(Subtype) %>% 
+  mutate(index_mut = row_number())# 3000 is the mutation number per M(b) %>% 
+
+plot_sum_med = plot_sum %>% group_by(Subtype) %>% 
+  summarise(median_mut = median(Mutation_per_Mb, na.rm = T))
+plot_sample_number = phe %>% group_by(Subtype) %>% summarise(n = n())
+
+
+pb_mut_all_bysubtype = ggplot(plot_sum %>%   mutate(Subtype = factor(Subtype, order_subtype)) )  + 
+  geom_jitter(aes(x = index_mut , y = Mutation_per_Mb), size = 0.1) +
+  geom_hline(data = plot_sum_med  %>%   mutate(Subtype = factor(Subtype, order_subtype)), mapping =  aes(yintercept = median_mut ), color = 'red') + 
+  geom_text(data = plot_sample_number  %>%   mutate(Subtype = factor(Subtype, order_subtype)), aes(x = 10, y = 50, label = n) ) +
+  facet_wrap(~ Subtype, nrow  = 1, scale = 'free_x', strip.position="bottom") +
+  theme_minimal_hgrid() + theme(axis.text.x = element_text(angle = 60)) +
+  yscale("log10", .format = TRUE) +
+  rremove('xlab') + rremove('x.text')
+
+
+eoffice::topptx(pb_mut_all_bysubtype, filename = plot_file, w = 6, h = 3 ,append = T, title = 'all mutations number' )
+
+
+
+```
+
+
+
+
+
+## Signature overview
+
+## All dataset together
+First, check the SBS96_selection plot
+<center>![](1_Signature/Combine/Signatures/SBS96/SBS96_selection_plot.pdf){width=50%}</center>:
+
+From the picture, the better number of signatures is 16. So we select solution=16 to analysis
+
+* 1. First, we plot all data together.
+```{r mut number order by log10}
+K = 16
+df_sig = read_tsv(paste0('1_Signature/Combine/Matrix/Signatures//SBS96/All_Solutions/SBS96_', K, '_Signatures/Activities/SBS96_S', K, '_NMF_Activities.txt')) %>% 
+  gather(Signature, N_mutations, -Samples) %>% 
+  filter(Samples %in% phe$Sample) %>% 
+  left_join(phe, by = c('Samples' = 'Sample')) %>% 
+  mutate(log10_N_mutations = log10(N_mutations + 1),
+         log2_N_mutations = log2(N_mutations + 1)) 
+
+order_sample = df_sig %>% 
+  group_by(Samples, Disease) %>% 
+  summarise(N_mutations_log10 = sum(log10_N_mutations), N_mutations_log2 = sum(log2_N_mutations), N_mutations = sum(N_mutations)) %>%
+   arrange(factor(Disease, levels =  order_disease), -N_mutations_log2)
+
+
+gb_sig <- ggbarplot(df_sig, x = 'Samples', y = 'log2_N_mutations', fill = 'Signature', color = NA,
+                    palette = paletteer_d("dichromat::GreentoMagenta_16") , x.text.angle = 90,
+          order = order_sample$Samples) + rremove('x.text') + rremove('xlab')  + rremove('x.ticks') 
+ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.mutburden.pdf', w= 10, h = 5)
+
+# percentage
+gb_sig <- ggbarplot(df_sig, x = 'Samples', y = 'N_mutations', fill = 'Signature', color = NA, 
+                    palette =paletteer_d("dichromat::GreentoMagenta_16"), x.text.angle = 90,
+          order = order_sample$Samples,position = position_fill()) + 
+  rremove('x.text') + rremove('xlab')  + rremove('x.ticks') 
+# ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.mutburden.nolog.pdf', w= 10, h = 5)
+ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.mutburden.percent.pdf', w= 10, h = 5)
+
+eoffice::topptx(gb_sig,filename = plot_file, w = 10, h = 5 ,append = T )
+
+
+# not log 
+order_sample = df_sig %>% 
+  group_by(Samples, Disease) %>% 
+  summarise(N_mutations_log10 = sum(log10_N_mutations), N_mutations = sum(N_mutations)) %>%
+   arrange(factor(Disease, levels =  order_disease), -N_mutations)
+
+
+gb_sig <- ggbarplot(df_sig, x = 'Samples', y = 'N_mutations', fill = 'Signature', color = NA,
+                    palette = paletteer_d("dichromat::GreentoMagenta_16"), x.text.angle = 90,
+          order = order_sample$Samples) + rremove('x.text') + rremove('xlab')  + rremove('x.ticks')  + coord_cartesian(ylim=c(0,50000))
+ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.mutburden.nolog.zoom50000.pdf', w= 10, h = 5)
+```
+
+
+- top: total mutation (SNV+DINUC+DBS) ; middle (percent stacked of distribution)
+```{r final distribution figure}
+order_sample = df_sig %>% 
+  group_by(Samples, Disease) %>% 
+  summarise(N_mutations_log10 = sum(log10_N_mutations), N_mutations_log2 = sum(log2_N_mutations), N_mutations = sum(N_mutations)) %>%
+   arrange(factor(Disease, levels =  order_disease), -N_mutations_log2)
+
+
+
+# percentage
+gb_sig <- ggbarplot(df_sig, x = 'Samples', y = 'N_mutations', fill = 'Signature', color = NA, 
+                    palette =paletteer_d("dichromat::GreentoMagenta_16"), x.text.angle = 90,
+          order = order_sample$Samples,position = position_fill()) + 
+  rremove('x.text') + rremove('xlab')  + rremove('x.ticks') 
+# ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.mutburden.nolog.pdf', w= 10, h = 5)
+ggsave2(gb_sig, filename = 'Results/SBS_Signature/barplot.mutburden.percent.pdf', w= 10, h = 5)
+
+eoffice::topptx(gb_sig,filename = plot_file, w = 10, h = 5 ,append = T )
+```
+
+
+```{r sample annotation}
+df_smp_annt = phe %>% 
+  select(Sample, Age, Gender, Disease, Subtype, BER, MMR, NER, HR, NHEJ, HBsAg, N_mutation_IGHV) %>% 
+  mutate(Age = if_else(Age >60, '>60 y', if_else(Age <= 60, '<=60 y', 'NA') ),
+         BER = if_else(!is.na(BER), 'BER mutated','BER unmutated'),
+         MMR = if_else(!is.na(MMR), 'MMR mutated','MMR unmutated'),
+         HR = if_else(!is.na(HR), 'HR mutated','HR unmutated'),
+         NER = if_else(!is.na(NER), 'NER mutated','NER unmutated'),
+         NHEJ = if_else(!is.na(NHEJ), 'NHEJ mutated','NHEJ unmutated')
+         ) %>% 
+  gather(content, value, -Sample) %>% mutate(yvalue = 1)
+
+plot_barAnnot <- function(mycontent, color) {
+  ggbarplot(df_smp_annt %>% filter(content == mycontent), palette = color, 
+                x = 'Sample', y= 'yvalue', fill = 'value',  color = NA, order = order_sample$Samples, legend = 'top') + 
+  labs(fill = mycontent) + ylim(0,1) +
+  #rremove('legend') +
+  theme(axis.text.x =  element_blank(), axis.text.y =  element_blank(), axis.line =  element_blank(), axis.title = element_blank(), axis.ticks = element_blank()) 
+
+}
+
+gb1 <- plot_barAnnot('Disease', col_disease)
+gb2 <- plot_barAnnot('Subtype', col_subtype)
+gb3 <- plot_barAnnot('Age', structure(c(brewer.pal(8,'Paired')[c(6,5)],  'grey'), names = c('>60 y','<=60 y', 'NA' )))
+gb4 <- plot_barAnnot('Gender',  structure(c(brewer.pal(8,'Paired')[c(8,7)],  'grey'), names = c('Female','Male', 'NA' )))
+gb5 <- plot_barAnnot('BER', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('BER mutated','BER unmutated' )) )
+gb6 <- plot_barAnnot('MMR', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('MMR mutated','MMR unmutated' )) )
+gb7 <- plot_barAnnot('NER', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('NER mutated','NER unmutated' )) )
+gb8 <- plot_barAnnot('HR', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('HR mutated','HR unmutated' )) )
+gb9 <- plot_barAnnot('NHEJ', structure(brewer.pal(8,'Paired')[c(2,1)], names = c('NHEJ mutated','NHEJ unmutated' )) )
+gb10 <- plot_barAnnot('HBsAg', structure(c(brewer.pal(10,'Paired')[c(10, 9)], 'grey'), names = c('HBV','No', 'NA' )) )
+gb11<- ggbarplot(phe %>% mutate(yvalue = 1), x = 'Sample', y= 'yvalue', fill = 'N_mutation_IGHV', color = NA, order = order_sample$Samples, legend = 'top') + 
+  scale_fill_gradient(low = 'white', high = 'black', na.value = 'white') +
+  rremove('legend') + 
+  theme(axis.text.x =  element_blank(), axis.text.y =  element_blank(),axis.line =  element_blank(), axis.title = element_blank(), axis.ticks = element_blank()) 
+
+eoffice::topptx(plot_grid(gb1 ,gb2, gb3,gb4, gb5,gb6,gb7, gb8,gb9, gb10, gb11, ncol = 1) ,filename = plot_file, w = 10, h = 8 ,append = T )
+ggsave(plot_grid(gb1 ,gb2, gb3,gb4, gb5,gb6,gb7, gb8,gb9, gb10, gb11, ncol = 1),
+       filename = 'Results/SBS_Signature/barplot.mutburden.annotation.pdf', w= 10, h = 5 )
+
+```
+
+# test signature have bias in source or disease
+We need to see whether there is a platform bias, so we can grep same diseases (DLBCL and MCL) from different sources to investigate source bias by chi-square test
+
+
+
+```{r pca disease}
+df_sig_mat= df_sig %>% left_join(phe %>% select(Samples = Sample, everything())) %>% 
+  #filter(Disease == 'DLBCL') %>% 
+  select(Samples, Signature, N_mutations, Disease, Source, Subtype ) %>% 
+  spread(Signature, N_mutations) %>% 
+  column_to_rownames('Samples') 
+
+# pca_res <- prcomp(df_sig_mat %>% select(-Subtype, -Disease, -Source) %>% as.matrix(), scale. = T)
+# autoplot(pca_res, data = df_sig_mat , colour = 'Subtype') + 
+#   scale_color_manual(values = col_select_subtype) +
+#   xlim(-0.03, 0.03) + ylim(-0.05, 0.05)  # Not good
+# eoffice::topptx(last_plot( ),filename = plot_file, w = 6, h = 4 ,append = T )
+
+#UMAP
+library(umap)
+df_sig_umap= umap(df_sig_mat  %>% select(starts_with('SBS96')) )
+
+# color by subtype
+ggscatter(data.frame(umap1 = df_sig_umap$layout[,1], umap2 = df_sig_umap$layout[,2], 
+                     Subtype =df_sig_mat$Subtype,  Source =df_sig_mat$Source),
+          x = 'umap1', y = 'umap2', color =  'Subtype', shape = 'Source', palette =  col_select_subtype) 
+
+eoffice::topptx(last_plot( ),filename = plot_file, w = 6, h = 4 ,append = T )
+
+
+
+```
+
+### verify JEM (Not USE)
+```{r}
+df_sig_jem = df_sig %>% filter( Disease != 'MCL') %>% select(Samples, Signature, N_mutations)  %>% 
+  spread(Signature, N_mutations) %>% select(-Samples) %>% cor()
+corrplot::corrplot(df_sig_jem, type = 'upper', method = "number")
+
+```
+
+
+
+### cosine similariy
+
+```{r cosine Sig14}
+df_sig_feat = read_tsv(paste0('1_Signature/Combine/Matrix/Signatures/SBS96/All_Solutions/SBS96_',K, '_Signatures/Signatures/SBS96_S', K, '_Signatures.txt')) %>%
+  dplyr::rename(MutationsType = MutationType) 
+
+ref_JEM = read_tsv('_Ref/2021_JEM.signatures.txt') %>% 
+      mutate(MutationsType = str_c(str_sub(`...1`, 1,1), '[', `...2`, ']', str_sub(`...1`,3,3))) %>% select(-`...1`,-`...2`) 
+cos_jem  = mycosin(df_sig_feat, ref_JEM) %>% mutate(Reference = '2021_JEM')
+
+
+ref_UK = read_tsv('_Ref/SignalDB.2022Science.RefSig.txt') %>% dplyr::rename(MutationsType = mutationClass) 
+cos_UK = mycosin(df_sig_feat, ref_UK) %>%  select(-SBS96) %>% mutate(Reference = '2022_UK')
+
+ref_COSMIC= read_tsv('_Ref/COSMIC_v3.2_SBS_GRCh37.txt') %>% dplyr::rename(MutationsType = Type) 
+cos_COSMIC = mycosin(df_sig_feat, ref_COSMIC) %>% mutate(Reference = 'COSMIC v3.2')
+
+ref_lymph = read_tsv('_Ref/2022_Nature_human_lymphocyte.signature.txt') 
+cos_lymph = mycosin(df_sig_feat, ref_lymph) %>% mutate(Reference = 'Human normal lymphocytes')
+write_tsv(cos_lymph, 'Results/SBS_Signature/Signature.cosineSimilarity.human_normal_lymphocyte.tsv')
+
+df_cos = bind_rows(cos_jem, cos_UK, cos_COSMIC)
+write_tsv(df_cos, 'Results/SBS_Signature/Signature.cosineSimilarity.tsv')
+
+
+  
+write_tsv(df_sig_feat %>%  mutate(X2 = str_sub(MutationsType, 3,5),
+                                  X1 = str_remove(str_remove(MutationsType, '>.]'), '\\[')) %>%
+            arrange(X2, X1), 
+          'Results/SBS_Signature/forplot_signature.tsv')
+
+#corrplot::corrplot(cosine(df_sig_feat %>% column_to_rownames('MutationsType')), type = 'upper')
+
+# plot cosine
+df_cos_top = df_cos %>% gather(Study, cosine, -Signature, -Reference) %>% 
+  group_by(Study, Reference) %>% arrange(-cosine) %>% top_n(1) %>% arrange(Reference, Study) %>% 
+  mutate(cosine = round(cosine,2)) 
+m_annot = df_cos_top %>%  unite( 'Sig_cosin',Signature, cosine,   sep = ' ') %>% spread(Reference, Sig_cosin)
+m_plot = df_cos_top %>% select(-Signature) %>% spread(Reference, cosine)
+
+write_tsv(m_annot, 'Results/SBS_Signature/top_cosine.tsv')
+
+p <- pheatmap::pheatmap(m_plot %>% column_to_rownames('Study'), cluster_rows = F, cluster_cols = F, 
+                   display_numbers  = m_annot %>% column_to_rownames('Study'))
+eoffice::topptx(p,filename = plot_file, w = 4, h = 6 ,append = T )
+
+
+```
+
+
+
+```{r plot sbs}
+library(ggsci)
+col.cosmic = structure(c('#5ABCEBFF', '#050708FF', '#D33C32FF', '#CBCACBFF', '#ABCD72FF', '#E7C9C6FF'),
+                       names = c("C>A", "C>G", "C>T", "T>A", "T>C" ,"T>G"))
+
+order.cosmic = df_sig_feat  %>% mutate(MutType6 = str_sub(MutationsType, 3,5 )) %>% arrange(MutType6, MutationsType) %>% pull(MutationsType)
+
+ plot_sbs <- function(df_sig_feat, ncol = 1) {
+   
+  ggbarplot(df_sig_feat %>% gather(SBS, value, -MutationsType) %>% mutate(MutType6 = str_sub(MutationsType, 3,5 )),
+            x= 'MutationsType', y = 'value', order = order.cosmic, 
+            color = NA, fill = 'MutType6', palette = col.cosmic, 
+            facet.by = 'SBS', ncol = ncol,  scale = 'free',
+            x.text.angle = 90) + 
+    rremove('xlab') +  rremove('x.text') + rremove('x.ticks') + 
+    rremove('ylab') + rremove('y.text') + rremove('y.ticks') + 
+    rremove('legend') 
+
+ }
+ 
+ plot_sbs(df_sig_feat, ncol = 4)
+ 
+ eoffice::topptx(last_plot( ),filename = plot_file, w = 10, h = 7 ,append = T )
+
+ ggsave(plot_sbs(df_sig_feat, ncol = 4), filename = 'Results/SBS_Signature/barplot.signature.SBS.pdf', h = 7, w = 10)
+ 
+```
+
+
+
+```{r DBS}
+df_dbs_feat = read_tsv(paste0('1_Signature/Combine/Matrix/Signatures/DBS78/Suggested_Solution/DBS78_De-Novo_Solution//Signatures/DBS78_De-Novo_Signatures.txt'))  
+
+ref_COSMIC_dbs= read_tsv('_Ref/COSMIC_v3.2_DBS_GRCh37.txt') %>% dplyr::rename(MutationsType = Type) 
+cos_COSMIC_dbs = mycosin_dbs(df_dbs_feat, ref_COSMIC_dbs) %>% mutate(Reference = 'COSMIC v3.2')
+
+
+ref_UK_dbs = read_tsv('_Ref/SignalDB.2022Science.RefSigDBS.txt') %>% dplyr::rename(MutationsType = mutationClass) 
+cos_UK_dbs = mycosin_dbs(df_dbs_feat, ref_UK_dbs) %>% mutate(Reference = '2022_UK')
+
+
+write_tsv(bind_rows(cos_COSMIC_dbs, cos_UK_dbs), 'Results/SBS_Signature/cosine_DBS.tsv')
+
+```
+
+
+
+```{r ID}
+# df_id_feat = read_tsv(paste0('1_Signature/Our/Signatures/ID83_Our/Suggested_Solution/ID83_De-Novo_Solution/Signatures/ID83_De-Novo_Signatures.txt')) 
+df_id_feat = read_tsv(paste0('1_Signature/Combine/Matrix/Signatures/ID83/Suggested_Solution/ID83_De-Novo_Solution/Signatures/ID83_De-Novo_Signatures.txt')) 
+
+ref_COSMIC_id= read_tsv('_Ref/COSMIC_v3.2_ID_GRCh37.txt') %>% dplyr::rename(MutationsType = Type) 
+cos_COSMIC = mycosin_id(df_id_feat, ref_COSMIC_id) %>% mutate(Reference = 'COSMIC v3.2')
+write_tsv(cos_COSMIC, 'Results/SBS_Signature/cosine_ID.tsv')
+
+```
+
+
+## katagis' signature
+```{r}
+df_kat_sig = read_tsv('2_Kataegis/rm_apobec_kataegis/Signatures/SBS96/All_Solutions/SBS96_2_Signatures/Activities/SBS96_S2_NMF_Activities.txt') %>% 
+  gather(Signature, N_mutation, -Samples) %>% 
+  separate(Samples, c('Sample', 'chrom', 'katageis_id'), sep = '\\|') %>%
+  left_join(phe) %>% 
+  filter(Sample %in% phe$Sample) %>% 
+  group_by(Sample) %>% mutate(pct_mutation = N_mutation/sum(N_mutation) * 100 ) %>% 
+  mutate(Signature = if_else(Signature == 'SBS96A', 'SigK2', 'SigK1'))
+
+
+```
+
+
+```{r}
+ggboxplot(df_kat_sig, y = 'pct_mutation', x = 'Disease', facet.by = 'Signature', scale = 'free')
+
+```
+
+###  CLuster kataegis and chi-square test to check platform bias (NOT RUN)
+
+```{r bias pca}
+df_kat_sig_mat= df_kat_sig %>% mutate(Sample = str_remove_all(Samples, '\\|.*')) %>% 
+  left_join(phe %>% select(Sample, Disease, Source)) %>% 
+  column_to_rownames('Samples')
+
+pca_res_kat_sig <- prcomp(df_kat_sig_mat %>% select(-Source, -Disease, -Sample) %>% as.matrix(), scale. = T)
+autoplot(pca_res_kat_sig, data = df_kat_sig_mat , colour = 'Disease', shape = 'Source') 
+
+```
+
+
+Cannot use PCA to see the bias, because the feature is only 4, which do not need to dimensed.
+
+
+```{r bias pheatmap}
+df_kat_sig = read_tsv('2_Kataegis/rm_apobec_kataegis//Signatures/SBS96/All_Solutions/SBS96_2_Signatures//Activities/SBS96_S2_NMF_Activities.txt')
+library(pheatmap)
+library(ggsci)
+library(RColorBrewer)
+
+annotate_row = data.frame(Sample = str_remove_all(df_kat_sig$Samples, '\\|.*'), Samples =  df_kat_sig$Samples) %>% 
+  left_join(phe %>% select(Sample, Source, Disease))  %>% column_to_rownames('Samples')
+
+
+ph <- pheatmap(df_kat_sig %>% column_to_rownames('Samples'), 
+               scale = 'row', show_rownames = F, cutree_rows = 4,
+         annotation_row = annotate_row %>% select(-Sample),
+         annotation_colors = list(Disease = col_disease, 
+                                  Source = col_source))
+
+#Chi-square test examines whether rows and columns of a contingency table are statistically significantly associated.
+df_kat_sig_test = df_kat_sig %>% bind_cols(Cluster = cutree(ph$tree_row, k = 8)) %>% 
+  separate(Samples, c('Sample', 'chrom', 'kataegis_id'), sep = '\\|') %>% 
+  left_join(phe) %>% 
+  group_by(Source, Cluster) %>% 
+  #summarise(N_sample = n()) %>% 
+  summarise(N_sample = length(unique(Sample))) %>% 
+  spread(Source, N_sample) %>% 
+ column_to_rownames('Cluster') %>% chisq.test()
+
+df_kat_sig_test$p.value 
+#H0: p> 0.05 the row and the column variables of the contingency table are independent.
+# In our case, the row and the column variables are statistically significantly associated. (p<0.05)
+
+# Contibution in percentage (%)
+contrib <- 100*df_kat_sig_test$residuals^2/df_kat_sig_test$statistic
+round(contrib, 3)
+corrplot::corrplot(contrib, is.cor = FALSE)
+
+
+```
+Cannot use HCA, becuase same disease may in same cluster. we can not know it is from disease or source. So directly used signature to test.
+
+```{r bias chisq: sig.-source}
+df_kat_sig_test = df_kat_sig %>% gather(Signature, exposure, -Samples ) %>% 
+  group_by(Samples) %>% mutate(percent = exposure/sum(exposure)) %>% 
+  filter(percent > 0) %>% 
+  separate(Samples, c('Sample', 'chrom', 'kataegis_id'), sep = '\\|') %>% 
+  left_join(phe) %>% 
+  group_by(Source, Signature) %>% 
+  summarise(N_sample = length(unique(Sample))) %>% 
+  spread(Source, N_sample) %>% 
+  column_to_rownames('Signature') %>% chisq.test()
+ 
+df_kat_sig_test$p.value  #p = 0.9
+df_kat_sig_test$observed
+
+
+ggbarplot(as.data.frame(df_kat_sig_test$observed)  %>% rownames_to_column('Signature') %>% gather(Source , N_sample, -Signature),
+          x = 'Source', y = 'N_sample', fill = 'Signature') + 
+  ggtext(x = 'Our', y = 800, label = paste0('chiseq.test = ', round(df_kat_sig_test$p.value,4) ))
+```
+
+
+
+
+
+### cosin similarity
+```{r cosin K2}
+dir.create('Results/rm_apobec_kataegis/')
+df_kat_sig_feat = read_tsv('2_Kataegis/rm_apobec_kataegis/Signatures/SBS96/All_Solutions/SBS96_2_Signatures/Signatures/SBS96_S2_Signatures.txt') %>%   dplyr::rename(MutationsType = MutationType)
+
+df_kat_sig_cos = mycosin(df_kat_sig_feat, ref_JEM)
+write_tsv(df_kat_sig_cos, 'Results/rm_apobec_kataegis//cosine_similarity.tsv')
+
+plot_sbs(df_kat_sig_feat %>% dplyr::rename( Sig.K2 = SBS96A , Sig.K1 =  SBS96B ))
+eoffice::topptx(last_plot( ),filename = plot_file, w = 5, h = 4 ,append = T )
+
+
+
+
+write_tsv(df_kat_sig_feat %>%  mutate(X2 = str_sub(MutationsType, 3,5),
+                                  X1 = str_remove(str_remove(MutationsType, '>.]'), '\\[')) %>%
+            left_join(read_tsv('2_Kataegis/apobec_kataegis/Matrix/kataegis_apobec_SBS96_Signatures.txt') %>% select(MutationsType = MutationType, K_APOBEC = APOBEC)) %>% 
+            arrange(X2, X1), 
+          'Results/rm_apobec_kataegis//forplot_kat_signature.tsv')
+
+```
+
+
+```{r cosin other K}
+
+df_kat_sig_feat = read_tsv('2_Kataegis/rm_apobec_kataegis/Signatures/SBS96/All_Solutions/SBS96_4_Signatures/Signatures/SBS96_S4_Signatures.txt') %>%   dplyr::rename(MutationsType = MutationType)
+
+df_kat_sig_cos = mycosin(df_kat_sig_feat, ref_JEM)
+write_tsv(df_kat_sig_cos, 'Results/rm_apobec_kataegis//cosine_similarity.K4.tsv')
+
+plot_sbs(df_kat_sig_feat %>% dplyr::rename( Sig.K2 = SBS96A , Sig.K1 =  SBS96B ))
+
+eoffice::topptx(last_plot( ),filename = plot_file, w = 4, h = 3 ,append = T )
+
+write_tsv(df_kat_sig_feat %>%  mutate(X2 = str_sub(MutationsType, 3,5),
+                                  X1 = str_remove(str_remove(MutationsType, '>.]'), '\\[')) %>%
+            left_join(read_tsv('2_Kataegis/apobec_kataegis/Matrix/kataegis_apobec_SBS96_Signatures.txt') %>% select(MutationsType = MutationType, K_APOBEC = APOBEC)) %>% 
+            arrange(X2, X1), 
+          'Results/rm_apobec_kataegis//forplot_kat_signature.K3.tsv')
+
+
+```
+
+
+```{r cosin Sig blood}
+# SBS101 vs SBSblood vs SBS96A
+df_blood_sig = ref_UK %>% select(MutationsType, SBS101) %>% 
+                       left_join(ref_lymph %>% select(MutationsType, `2022_lymphocyte_SBSblood`)) %>% 
+                        left_join(ref_JEM %>% select(MutationsType, G1)) %>% 
+                       left_join(df_sig_feat %>% select(MutationsType, SBS96A))
+cos.blood =   cosine(df_blood_sig %>% select(-MutationsType)) %>% as.matrix()   %>%   as.data.frame() 
+write_tsv(cos.blood, 'Results/SBS_Signature/Signature.cosineSimilarity.human_blood.tsv')
+
+plot_sbs(df_blood_sig, ncol = 1)
+eoffice::topptx(last_plot( ),filename = plot_file, w = 4, h = 5 ,append = T )
+```
+
+
+
+
+```{r cosin Sig SBS9}
+# SBS9 vs RefSig9 vs SBS96C vs POLH vs 
+ref_polh = read_tsv('_Ref/2001_JMB_POLH.signatures.txt')  %>% dplyr::rename(MutationsType = MutationType) 
+ref_aid = read_tsv('_Ref/2015_NC_AID.signatures.txt') %>% dplyr::rename(MutationsType = MutationType) 
+
+df_GC_sig = ref_UK %>% select(MutationsType, RefSig9 = SBS9) %>% 
+                         left_join(ref_COSMIC %>% select(MutationsType, COSMIC9 = SBS9, COSMIC84=SBS84, COSMIC85=SBS85)) %>% 
+                       left_join(ref_lymph %>% select(MutationsType, `2022_lymphocyte_SBS9`)) %>% 
+                       left_join(ref_JEM %>% select(MutationsType, G4, G7)) %>% 
+                        left_join(ref_polh) %>% left_join(ref_aid) %>% 
+                       left_join(df_sig_feat %>% select(MutationsType, SBS96C, SBS96I))  %>% 
+  left_join(df_kat_sig_feat %>% select(MutationsType, K1 = SBS96B, K2 = SBS96A))
+
+cos.GC =   cosine(df_GC_sig %>% select(-MutationsType)) %>% as.matrix()   %>%   as.data.frame() 
+write_tsv(cos.blood, 'Results/SBS_Signature/Signature.cosineSimilarity.GCreaction.tsv')
+
+plot_sbs(df_GC_sig, ncol = 2)
+eoffice::topptx(last_plot( ),filename = plot_file, w = 8, h = 5 ,append = T )
+
+p <- pheatmap::pheatmap(cos.GC, cluster_rows = T, cluster_cols = T, 
+                   display_numbers  = round(cos.GC,2) )
+eoffice::topptx(p,filename = plot_file, w = 6, h = 5 ,append = T )
+
+```
+
+
+```{r cosin apobec}
+df_kat_sig= read_tsv('2_Kataegis/MutateType.kataegisSig.tsv') 
+df_apobec_sig = df_kat_sig %>% select(MutationsType, `Sig K_APOBEC`) %>% 
+   left_join(ref_UK %>% select(MutationsType, SBS2)) %>% 
+   left_join(df_sig_feat %>% select(MutationsType, SBS96M))
+cos.apobec =   cosine(df_apobec_sig %>% select(-MutationsType)) %>% as.matrix()   %>%   as.data.frame() 
+write_tsv(cos.blood, 'Results/SBS_Signature/Signature.cosineSimilarity.apobec.tsv')
+```
+
+
+```{r correlation with IGHVmut}
+
+mat.cor = df_sum %>% select(N_mutation_IGHV, starts_with('SBS96'),starts_with('DBS'), starts_with('ID'),  N_kataegis_K1, N_kataegis_K2)
+mat.cor[is.na(mat.cor)] = 0
+df.cor = cor(mat.cor, use = "pairwise.complete.obs", method = 'pearson')
+df.cor.p = cor.test(mat.cor)
+
+ggbarplot(as.data.frame(df.cor) %>% rownames_to_column('Signatures') %>% filter(Signatures != 'N_mutation_IGHV' ) ,
+          x = 'Signatures', y = 'N_mutation_IGHV', sort.val = "desc")
+
+```
+
